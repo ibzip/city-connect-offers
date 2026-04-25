@@ -6,12 +6,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "./pages/NotFound.tsx";
 import { AppStoreProvider } from "./citywallet/store/AppStore";
 import { AppShell } from "./citywallet/components/AppShell";
-import { DemoOverviewPage } from "./citywallet/pages/DemoOverviewPage";
-import { WalletPage } from "./citywallet/pages/WalletPage";
-import { MerchantRulesPage } from "./citywallet/pages/MerchantRulesPage";
-import { MerchantDashboardPage } from "./citywallet/pages/MerchantDashboardPage";
-import { NegotiationDebugPage } from "./citywallet/pages/NegotiationDebugPage";
+import { DemoStagePage } from "./citywallet/pages/DemoStagePage";
+import { MerchantPage } from "./citywallet/pages/MerchantPage";
 import { RedemptionPage } from "./citywallet/pages/RedemptionPage";
+import { DebugPage } from "./citywallet/pages/DebugPage";
 
 const queryClient = new QueryClient();
 
@@ -24,12 +22,10 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route element={<AppShell />}>
-              <Route path="/" element={<DemoOverviewPage />} />
-              <Route path="/wallet" element={<WalletPage />} />
-              <Route path="/merchant-rules" element={<MerchantRulesPage />} />
-              <Route path="/merchant-dashboard" element={<MerchantDashboardPage />} />
-              <Route path="/negotiation" element={<NegotiationDebugPage />} />
+              <Route path="/" element={<DemoStagePage />} />
+              <Route path="/merchant" element={<MerchantPage />} />
               <Route path="/redemption" element={<RedemptionPage />} />
+              <Route path="/debug" element={<DebugPage />} />
             </Route>
             {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
             <Route path="*" element={<NotFound />} />
