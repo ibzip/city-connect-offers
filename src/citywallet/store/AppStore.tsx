@@ -33,6 +33,7 @@ interface State {
   offer: Offer | null;
   tokens: RedemptionToken[];
   analytics: Record<string, MerchantAnalytics>;
+  negotiating: boolean;
 }
 
 function freshAnalytics(): Record<string, MerchantAnalytics> {
@@ -63,6 +64,7 @@ function initialState(): State {
     offer: null,
     tokens: [],
     analytics: freshAnalytics(),
+    negotiating: false,
   };
 }
 
@@ -80,7 +82,8 @@ type Action =
   | { type: "UPDATE_OFFER_STATUS"; payload: OfferStatus }
   | { type: "SET_TOKENS"; payload: RedemptionToken[] }
   | { type: "REDEEM_TOKEN"; payload: { tokenId: string; cashback: number } }
-  | { type: "BUMP_ANALYTICS"; payload: { merchantId: string; patch: Partial<MerchantAnalytics> } };
+  | { type: "BUMP_ANALYTICS"; payload: { merchantId: string; patch: Partial<MerchantAnalytics> } }
+  | { type: "SET_NEGOTIATING"; payload: boolean };
 
 function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -129,6 +132,8 @@ function reducer(state: State, action: Action): State {
       };
       return { ...state, analytics: { ...state.analytics, [cur.merchantId]: next } };
     }
+    case "SET_NEGOTIATING":
+      return { ...state, negotiating: action.payload };
     default:
       return state;
   }
@@ -159,7 +164,7 @@ interface AppStoreContextValue {
   refreshMerchantInsights: () => void;
   updateConsumerContext: (next: ConsumerContext) => void;
   updateMerchant: (m: MerchantConfig) => void;
-  triggerEvent: (event: TriggerEvent) => void;
+  triggerEvent: (event: TriggerEvent) => Promise<void>;
   claimOffer: () => void;
   dismissOffer: () => void;
   redeemToken: (tokenId: string) => void;
@@ -202,7 +207,7 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
   }, [state.merchants]);
 
   const triggerEvent = useCallback(
-    (event: TriggerEvent) => {
+    async (event: TriggerEvent) => {
       // Ensure insights exist
       let insights = state.insights;
       if (insights.length === 0) {
@@ -213,23 +218,28 @@ export function AppStoreProvider({ children }: { children: ReactNode }) {
         dispatch({ type: "SET_INSIGHTS", payload: insights });
       }
 
-      const result = orchestrate(event, state.consumer, insights, state.triggers);
-      dispatch({ type: "SET_ORCH", payload: result });
+      dispatch({ type: "SET_NEGOTIATING", payload: true });
+      try {
+        const result = await orchestrate(event, state.consumer, insights, state.triggers);
+        dispatch({ type: "SET_ORCH", payload: result });
 
-      const events: AnalyticsEvent[] = result.events.map((e) =>
-        mkEvent(e.type, e.layer, e.message, e.data),
-      );
-      dispatch({ type: "PUSH_EVENTS", payload: events });
-      dispatch({ type: "PUSH_TIMELINE", payload: mkStep(`Trigger: ${event}`, "config", `${result.candidates.filter((c) => c.considered).length} candidates → ${result.decision.decision}`) });
-      dispatch({ type: "PUSH_TIMELINE", payload: mkStep("Negotiation decision", "negotiation", `${result.decision.decision} (confidence ${result.decision.confidence})`) });
-      dispatch({ type: "PUSH_TIMELINE", payload: mkStep(result.validation.passed ? "Validation passed" : "Validation failed", "validation", `${result.validation.results.length} validators run`) });
+        const events: AnalyticsEvent[] = result.events.map((e) =>
+          mkEvent(e.type, e.layer, e.message, e.data),
+        );
+        dispatch({ type: "PUSH_EVENTS", payload: events });
+        dispatch({ type: "PUSH_TIMELINE", payload: mkStep(`Trigger: ${event}`, "config", `${result.candidates.filter((c) => c.considered).length} candidates → ${result.decision.decision}`) });
+        dispatch({ type: "PUSH_TIMELINE", payload: mkStep(`gpt-5.2 decision · ${result.llm.source}`, "negotiation", `${result.decision.decision} (confidence ${result.decision.confidence}) · ${result.llm.latencyMs}ms`) });
+        dispatch({ type: "PUSH_TIMELINE", payload: mkStep(result.validation.passed ? "Validation passed" : "Validation failed", "validation", `${result.validation.results.length} validators run`) });
 
-      if (result.offer) {
-        dispatch({ type: "SET_OFFER", payload: result.offer });
-        result.offer.items.forEach((it) => {
-          dispatch({ type: "BUMP_ANALYTICS", payload: { merchantId: it.merchantId, patch: { offersGenerated: 1 } } });
-        });
-        dispatch({ type: "PUSH_TIMELINE", payload: mkStep("Offer shown in wallet", "consumer", result.offer.headline) });
+        if (result.offer) {
+          dispatch({ type: "SET_OFFER", payload: result.offer });
+          result.offer.items.forEach((it) => {
+            dispatch({ type: "BUMP_ANALYTICS", payload: { merchantId: it.merchantId, patch: { offersGenerated: 1 } } });
+          });
+          dispatch({ type: "PUSH_TIMELINE", payload: mkStep("Offer shown in wallet", "consumer", result.offer.headline) });
+        }
+      } finally {
+        dispatch({ type: "SET_NEGOTIATING", payload: false });
       }
     },
     [state.consumer, state.insights, state.merchants, state.triggers],
