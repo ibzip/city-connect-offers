@@ -1,1 +1,4 @@
 project_id = "cndlhtzgjtkhaqdirwhe"
+
+[functions.negotiate]
+verify_jwt = false
