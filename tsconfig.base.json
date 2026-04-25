@@ -1,0 +1,36 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowJs": false,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@city-wallet/contracts": ["packages/contracts/src/index.ts"],
+      "@city-wallet/config": ["packages/config/src/index.ts"],
+      "@city-wallet/ui": ["packages/ui/src/index.ts"],
+      "@city-wallet/db": ["packages/db/src/index.ts"],
+      "@city-wallet/data-seed": ["packages/data-seed/src/index.ts"],
+      "@city-wallet/providers": ["packages/providers/src/index.ts"],
+      "@city-wallet/service-clients": ["packages/service-clients/src/index.ts"],
+      "@city-wallet/context-domain": ["packages/context-domain/src/index.ts"],
+      "@city-wallet/merchant-intelligence-domain": ["packages/merchant-intelligence-domain/src/index.ts"],
+      "@city-wallet/consumer-agent-domain": ["packages/consumer-agent-domain/src/index.ts"],
+      "@city-wallet/negotiation-domain": ["packages/negotiation-domain/src/index.ts"],
+      "@city-wallet/validation-domain": ["packages/validation-domain/src/index.ts"],
+      "@city-wallet/offer-domain": ["packages/offer-domain/src/index.ts"],
+      "@city-wallet/redemption-domain": ["packages/redemption-domain/src/index.ts"],
+      "@city-wallet/analytics-domain": ["packages/analytics-domain/src/index.ts"],
+      "@city-wallet/utils": ["packages/utils/src/index.ts"]
+    }
+  }
+}

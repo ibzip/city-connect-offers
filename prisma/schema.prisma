@@ -1,0 +1,195 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Local MVP default uses SQLite with DATABASE_URL="file:./dev.db".
+// The models avoid SQLite-only field types so the same schema shape can be
+// promoted to an AWS RDS/Aurora PostgreSQL target by switching provider/url.
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id
+  createdAt DateTime @default(now())
+  profile   UserProfile?
+  contexts  UserContextSnapshot[]
+}
+
+model UserProfile {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  data      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model UserContextSnapshot {
+  id        String   @id
+  userId    String
+  data      String
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+model Merchant {
+  id        String   @id
+  data      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  products  MerchantProduct[]
+  goals     MerchantGoal[]
+  rule      MerchantRule?
+}
+
+model MerchantProduct {
+  id         String   @id
+  merchantId String
+  data       String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+}
+
+model MerchantGoal {
+  id         String   @id
+  merchantId String
+  data       String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+}
+
+model MerchantRule {
+  merchantId String   @id
+  data       String
+  updatedAt  DateTime @updatedAt
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+}
+
+model MerchantTransactionBaseline {
+  id         String   @id @default(cuid())
+  merchantId String
+  data       String
+  createdAt  DateTime @default(now())
+}
+
+model MerchantTransactionSnapshot {
+  id         String   @id @default(cuid())
+  merchantId String
+  data       String
+  createdAt  DateTime @default(now())
+}
+
+model MerchantInsightSnapshot {
+  id         String   @id
+  merchantId String   @unique
+  data       String
+  refreshedAt DateTime
+}
+
+model UserEvent {
+  id         String   @id
+  userId     String
+  eventType  String
+  data       String
+  observedAt DateTime
+}
+
+model TriggerMatch {
+  id          String   @id
+  userEventId String
+  triggerId   String
+  matchedAt   DateTime
+}
+
+model NegotiationBrief {
+  id        String   @id
+  userId    String
+  data      String
+  createdAt DateTime @default(now())
+  decisions NegotiationDecision[]
+}
+
+model NegotiationDecision {
+  id           String   @id
+  briefId      String
+  decisionType String
+  data         String
+  createdAt    DateTime @default(now())
+  brief        NegotiationBrief @relation(fields: [briefId], references: [id], onDelete: Cascade)
+}
+
+model ValidationResult {
+  id         String   @id
+  decisionId String
+  valid      Boolean
+  data       String
+  createdAt  DateTime @default(now())
+}
+
+model Offer {
+  id         String   @id
+  consumerId String
+  type       String
+  status     String
+  data       String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  items      OfferItem[]
+  tokens     RedemptionToken[]
+}
+
+model OfferItem {
+  id         String   @id
+  offerId    String
+  merchantId String
+  data       String
+  offer      Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+}
+
+model RedemptionToken {
+  id         String   @id
+  offerId    String
+  merchantId String
+  code       String   @unique
+  status     String
+  data       String
+  createdAt  DateTime @default(now())
+  offer      Offer    @relation(fields: [offerId], references: [id], onDelete: Cascade)
+}
+
+model Redemption {
+  id                  String   @id
+  offerId             String
+  merchantId          String
+  tokenId             String
+  cashbackIssuedEuro  Float
+  data                String
+  createdAt           DateTime @default(now())
+}
+
+model CashbackLedgerEntry {
+  id         String   @id
+  userId     String
+  offerId    String
+  merchantId String
+  amountEuro Float
+  data       String
+  createdAt  DateTime @default(now())
+}
+
+model AnalyticsEvent {
+  id         String   @id
+  type       String
+  merchantId String?
+  offerId    String?
+  data       String
+  createdAt  DateTime @default(now())
+}
+
+model DebugRun {
+  id        String   @id
+  data      String
+  createdAt DateTime @default(now())
+}

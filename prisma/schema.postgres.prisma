@@ -1,0 +1,11 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// PostgreSQL/Aurora target mirrors prisma/schema.prisma. Keep data columns as
+// String for local parity; they can be promoted to Json in a hardening pass.
