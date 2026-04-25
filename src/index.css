@@ -8,35 +8,63 @@ All colors MUST be HSL.
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    /* Base surface */
+    --background: 220 30% 97%;
+    --foreground: 222 47% 11%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 222 47% 11%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 222 47% 11%;
 
-    --primary: 222.2 47.4% 11.2%;
+    /* Brand: deep indigo "City" */
+    --primary: 235 65% 22%;
     --primary-foreground: 210 40% 98%;
+    --primary-glow: 235 80% 60%;
 
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 220 20% 94%;
+    --secondary-foreground: 222 47% 11%;
 
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    --muted: 220 20% 94%;
+    --muted-foreground: 220 12% 42%;
 
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
+    --accent: 35 95% 55%;
+    --accent-foreground: 222 47% 11%;
 
-    --destructive: 0 84.2% 60.2%;
+    --destructive: 0 75% 55%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 222.2 84% 4.9%;
+    --success: 152 65% 38%;
+    --success-foreground: 0 0% 100%;
 
-    --radius: 0.5rem;
+    --warning: 38 95% 50%;
+    --warning-foreground: 222 47% 11%;
+
+    --border: 220 18% 88%;
+    --input: 220 18% 88%;
+    --ring: 235 65% 22%;
+
+    --radius: 0.85rem;
+
+    /* Layer-specific accent colors (each system layer has its own hue) */
+    --layer-config: 220 70% 50%;       /* blue   - providers/config */
+    --layer-merchant: 28 90% 50%;      /* orange - merchant insights */
+    --layer-consumer: 280 60% 55%;     /* purple - consumer context */
+    --layer-negotiation: 195 85% 42%;  /* teal   - negotiation */
+    --layer-validation: 152 65% 38%;   /* green  - validation */
+    --layer-redemption: 340 75% 50%;   /* pink   - redemption */
+
+    --gradient-hero: linear-gradient(135deg, hsl(235 65% 22%), hsl(235 80% 45%) 60%, hsl(280 60% 55%));
+    --gradient-card: linear-gradient(160deg, hsl(0 0% 100%), hsl(220 30% 98%));
+    --gradient-wallet: linear-gradient(160deg, hsl(235 65% 22%), hsl(195 85% 35%));
+    --gradient-bundle: linear-gradient(135deg, hsl(35 95% 55%), hsl(15 90% 55%));
+
+    --shadow-soft: 0 4px 16px -4px hsl(235 50% 20% / 0.10);
+    --shadow-elevated: 0 14px 40px -12px hsl(235 50% 20% / 0.22);
+    --shadow-glow: 0 0 0 1px hsl(235 80% 60% / 0.3), 0 12px 30px -10px hsl(235 80% 60% / 0.4);
+
+    --transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 
     --sidebar-background: 0 0% 98%;
 
@@ -56,7 +84,7 @@ All colors MUST be HSL.
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 224 35% 8%;
     --foreground: 210 40% 98%;
 
     --card: 222.2 84% 4.9%;
