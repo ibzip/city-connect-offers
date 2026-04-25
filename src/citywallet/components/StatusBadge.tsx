@@ -1,18 +1,26 @@
 import { cn } from "@/lib/utils";
 
-type Tone = "neutral" | "success" | "warning" | "danger" | "info";
+type Variant = "neutral" | "teal" | "success" | "warning" | "danger";
 
-const TONE_CLASS: Record<Tone, string> = {
-  neutral: "bg-secondary text-secondary-foreground",
-  success: "bg-success/15 text-success",
-  warning: "bg-warning/20 text-warning-foreground",
-  danger: "bg-destructive/15 text-destructive",
-  info: "bg-primary/10 text-primary",
+const styles: Record<Variant, string> = {
+  neutral: "bg-black/5 text-ink-muted",
+  teal: "bg-teal/10 text-teal",
+  success: "bg-success-bg text-success",
+  warning: "bg-amber-100 text-amber-900",
+  danger: "bg-red-100 text-red-900",
 };
 
-export function StatusBadge({ tone = "neutral", children, className }: { tone?: Tone; children: React.ReactNode; className?: string }) {
+export function StatusBadge({
+  children,
+  variant = "neutral",
+  className,
+}: {
+  children: React.ReactNode;
+  variant?: Variant;
+  className?: string;
+}) {
   return (
-    <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium", TONE_CLASS[tone], className)}>
+    <span className={cn("label-tag font-medium", styles[variant], className)}>
       {children}
     </span>
   );

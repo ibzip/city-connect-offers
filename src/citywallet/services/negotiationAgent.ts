@@ -1,122 +1,68 @@
-import type {
-  NegotiationBrief,
-  NegotiationDecision,
-  OfferItem,
-} from "../types";
-import { getMerchant } from "../config/merchants";
+import type { NegotiationBrief, NegotiationDecision } from "../types";
+import { supabase } from "@/integrations/supabase/client";
 
-export interface NegotiationAgent {
-  decide(brief: NegotiationBrief): NegotiationDecision;
-  name: string;
+export type NegotiationSource = "live" | "fallback";
+
+export interface NegotiationResult {
+  decision: NegotiationDecision;
+  source: NegotiationSource;
+  model?: string;
+  reason?: string;
+  latencyMs: number;
 }
 
 /**
- * Deterministic LLM-style negotiation agent.
- * Future: swap with a real LLM-backed implementation that conforms to the same interface.
+ * Calls the `negotiate` edge function which forwards to gpt-5.2 via the
+ * Lovable AI Gateway. The edge function always returns a valid decision
+ * (live or cached fallback). If even the edge function is unreachable,
+ * we fall back further client-side so the demo never breaks.
  */
-export const mockLLMNegotiationAgent: NegotiationAgent = {
-  name: "mock_llm_v1",
-  decide(brief: NegotiationBrief): NegotiationDecision {
-    const eligibleBundles = brief.candidateBundles.filter((b) => !b.rejectedReason);
-    const topBundle = eligibleBundles[0];
-
-    // Prefer bundle if a strong one exists with enough utility.
-    if (topBundle && topBundle.preliminaryScore >= 60) {
-      const items: OfferItem[] = topBundle.merchantIds.map((mid) => {
-        const m = getMerchant(mid)!;
-        const insight = brief.insights.find((i) => i.merchantId === mid)!;
-        // Smallest sufficient incentive: scale with urgency.
-        const basePct = insight.urgencyScore >= 75
-          ? 15
-          : insight.urgencyScore >= 50
-            ? 12
-            : 10;
-        const pct = Math.min(basePct, m.rules.maxDiscountPercent);
-        const product = m.products.find((p) => m.rules.eligibleProductIds.includes(p.id))!;
-        return {
-          merchantId: m.id,
-          merchantName: m.name,
-          productId: product.id,
-          productName: product.name,
-          productPriceEUR: product.basePriceEUR,
-          incentiveType: "cashback",
-          percent: pct,
-          distanceMeters: m.distanceMeters,
-        };
-      });
-
-      const reasoning = [
-        `Cold weather (${brief.context.weather.temperatureC}°C, ${brief.context.weather.conditions}) supports a warm-indoor journey.`,
-        `User declared intent: "${brief.context.declared.intent.replace(/_/g, " ")}" during ${brief.context.time.label}.`,
-        ...items.map((it) => {
-          const ins = brief.insights.find((x) => x.merchantId === it.merchantId)!;
-          return `${it.merchantName} is ${ins.businessState.replace("_", " ")} (urgency ${ins.urgencyScore}) — bundling helps refill demand.`;
-        }),
-        `Total walk fits within ${brief.context.declared.walkingToleranceMeters}m tolerance.`,
-        "Chose the smallest sufficient cashback per merchant (long-term value over deep discount).",
-      ];
-
+export async function negotiate(brief: NegotiationBrief): Promise<NegotiationResult> {
+  const t0 = performance.now();
+  try {
+    const { data, error } = await supabase.functions.invoke("negotiate", {
+      body: { brief },
+    });
+    const latencyMs = Math.round(performance.now() - t0);
+    if (error) {
+      console.error("negotiate invoke error", error);
       return {
-        decision: "bundle_offer",
-        selectedMerchantIds: items.map((i) => i.merchantId),
-        items,
-        consumerIncentivesOffered: items.map(
-          (i) => `${i.percent}% cashback on ${i.productName} at ${i.merchantName}`,
-        ),
-        merchantIncentivesOffered: items.map(
-          (i) => `Qualified high-intent visit from ${brief.context.user.displayName} (${i.distanceMeters}m)`,
-        ),
-        utilityAssessment: {
-          consumerUtility: 82,
-          merchantUtility: 78,
-          platformUtility: 88,
-        },
-        longTermGoalFit: [
-          "increases sustainable merchant footfall",
-          "supports merchant cooperation",
-          "respects consumer attention with one high-relevance offer",
-        ],
-        reasoning,
-        consumerHeadline: "Cold outside? Make it a warm city break.",
-        consumerSubheadline:
-          "Start with a cappuccino nearby, then get cashback on a paperback around the corner.",
-        cta: "Claim bundle",
-        confidence: 0.86,
+        decision: localFallback(brief),
+        source: "fallback",
+        reason: "invoke_error",
+        latencyMs,
       };
     }
-
-    // Fallback: single offer for the most urgent considered merchant.
-    const consideredCandidates = brief.candidates.filter((c) => c.considered);
-    const top = [...consideredCandidates].sort((a, b) => b.fitScore - a.fitScore)[0];
-    if (top) {
-      const m = getMerchant(top.merchantId)!;
-      const product = m.products[0];
-      const item: OfferItem = {
-        merchantId: m.id,
-        merchantName: m.name,
-        productId: product.id,
-        productName: product.name,
-        productPriceEUR: product.basePriceEUR,
-        incentiveType: "cashback",
-        percent: Math.min(10, m.rules.maxDiscountPercent),
-        distanceMeters: m.distanceMeters,
-      };
+    if (!data?.decision) {
       return {
-        decision: "single_offer",
-        selectedMerchantIds: [m.id],
-        items: [item],
-        consumerIncentivesOffered: [`${item.percent}% cashback on ${item.productName}`],
-        merchantIncentivesOffered: ["Qualified visit from nearby user"],
-        utilityAssessment: { consumerUtility: 60, merchantUtility: 65, platformUtility: 70 },
-        longTermGoalFit: ["protect consumer attention", "support local merchant"],
-        reasoning: [`Single offer chosen — no strong bundle available.`],
-        consumerHeadline: `A small reward nearby`,
-        consumerSubheadline: `${item.percent}% cashback at ${item.merchantName}`,
-        cta: "Claim offer",
-        confidence: 0.6,
+        decision: localFallback(brief),
+        source: "fallback",
+        reason: "empty_response",
+        latencyMs,
       };
     }
+    return {
+      decision: data.decision as NegotiationDecision,
+      source: (data.source ?? "fallback") as NegotiationSource,
+      model: data.model,
+      reason: data.reason,
+      latencyMs,
+    };
+  } catch (e) {
+    console.error("negotiate threw", e);
+    return {
+      decision: localFallback(brief),
+      source: "fallback",
+      reason: "exception",
+      latencyMs: Math.round(performance.now() - t0),
+    };
+  }
+}
 
+function localFallback(brief: NegotiationBrief): NegotiationDecision {
+  const haveCafe = brief.candidates.some((c) => c.merchantId === "cafe_muller" && c.considered);
+  const haveBook = brief.candidates.some((c) => c.merchantId === "buchhandlung_anna" && c.considered);
+  if (!haveCafe || !haveBook) {
     return {
       decision: "no_offer",
       selectedMerchantIds: [],
@@ -125,11 +71,60 @@ export const mockLLMNegotiationAgent: NegotiationAgent = {
       merchantIncentivesOffered: [],
       utilityAssessment: { consumerUtility: 0, merchantUtility: 0, platformUtility: 30 },
       longTermGoalFit: ["protect consumer attention"],
-      reasoning: ["No relevant merchants/bundles match current context — staying silent is the best action."],
+      reasoning: ["Local fallback engaged; no candidate cafe+bookshop pairing available."],
       consumerHeadline: "",
       consumerSubheadline: "",
       cta: "",
-      confidence: 0.7,
+      confidence: 0.5,
     };
-  },
-};
+  }
+  return {
+    decision: "bundle_offer",
+    selectedMerchantIds: ["cafe_muller", "buchhandlung_anna"],
+    items: [
+      {
+        merchantId: "cafe_muller",
+        merchantName: "Café Müller",
+        productId: "p_capp",
+        productName: "Cappuccino",
+        productPriceEUR: 3.6,
+        incentiveType: "cashback",
+        percent: 15,
+        distanceMeters: 80,
+      },
+      {
+        merchantId: "buchhandlung_anna",
+        merchantName: "Buchhandlung Anna",
+        productId: "p_paperback",
+        productName: "Paperback (any)",
+        productPriceEUR: 12,
+        incentiveType: "cashback",
+        percent: 12,
+        distanceMeters: 120,
+      },
+    ],
+    consumerIncentivesOffered: [
+      "15% cashback on a Cappuccino at Café Müller",
+      "12% cashback on any paperback at Buchhandlung Anna",
+    ],
+    merchantIncentivesOffered: [
+      "Qualified visit (80m walk) — refills a quiet afternoon seat",
+      "Curious foot-traffic conversion (120m walk)",
+    ],
+    utilityAssessment: { consumerUtility: 82, merchantUtility: 78, platformUtility: 88 },
+    longTermGoalFit: [
+      "increases sustainable merchant footfall",
+      "supports local merchant cooperation",
+    ],
+    reasoning: [
+      "Local fallback (edge function unreachable).",
+      "Cold lunch break + 'warm city break' intent → indoor calm bundle.",
+      "Café Müller is very quiet — bundling refills demand.",
+      "Smallest sufficient cashback per merchant.",
+    ],
+    consumerHeadline: "Cold outside? Make it a warm city break.",
+    consumerSubheadline: "Cappuccino nearby, then a paperback around the corner.",
+    cta: "Claim bundle",
+    confidence: 0.7,
+  };
+}

@@ -16,7 +16,7 @@ import { merchants } from "../config/merchants";
 import { bundlePolicy, offerPolicy, platformGoalModel } from "../config/policies";
 import { buildConsumerAgentPosition } from "../config/consumer";
 import { buildCandidateBundles, selectCandidateMerchants } from "./candidates";
-import { mockLLMNegotiationAgent } from "./negotiationAgent";
+import { negotiate, type NegotiationSource } from "./negotiationAgent";
 import { evaluateTriggers, type TriggerMatch } from "./triggerEvaluator";
 import { validateDecision } from "./validators";
 import { buildOfferFromDecision } from "./redemption";
@@ -32,14 +32,20 @@ export interface OrchestrationResult {
   validation: ValidationReport;
   offer: Offer | null;
   events: Omit<AnalyticsEvent, "id" | "ts">[];
+  llm: {
+    source: NegotiationSource;
+    model?: string;
+    reason?: string;
+    latencyMs: number;
+  };
 }
 
-export function orchestrate(
+export async function orchestrate(
   event: TriggerEvent,
   ctx: ConsumerContext,
   insights: MerchantInsightSnapshot[],
   triggers: TriggerConfig[],
-): OrchestrationResult {
+): Promise<OrchestrationResult> {
   const events: Omit<AnalyticsEvent, "id" | "ts">[] = [];
 
   const triggerMatches = evaluateTriggers(triggers, event);
@@ -54,7 +60,6 @@ export function orchestrate(
   });
 
   const consumerAgent = buildConsumerAgentPosition(ctx.declared);
-
   const candidates = selectCandidateMerchants(merchants, insights, ctx);
   const candidateBundles = buildCandidateBundles(merchants, candidates, insights, ctx);
 
@@ -75,12 +80,14 @@ export function orchestrate(
     message: `Negotiation requested with ${candidates.filter((c) => c.considered).length} considered merchants and ${candidateBundles.length} bundle candidates`,
   });
 
-  const decision = mockLLMNegotiationAgent.decide(brief);
+  const result = await negotiate(brief);
+  const decision = result.decision;
+
   events.push({
     type: "negotiation_decision_created",
     layer: "negotiation",
-    message: `Decision: ${decision.decision} (confidence ${decision.confidence})`,
-    data: { decision: decision.decision, confidence: decision.confidence },
+    message: `Decision: ${decision.decision} (confidence ${decision.confidence}) — ${result.source}${result.model ? ` · ${result.model}` : ""}${result.reason ? ` · ${result.reason}` : ""} · ${result.latencyMs}ms`,
+    data: { decision: decision.decision, source: result.source, latencyMs: result.latencyMs },
   });
 
   const validation = validateDecision(decision, merchants, ctx.declared.walkingToleranceMeters);
@@ -115,5 +122,11 @@ export function orchestrate(
     validation,
     offer,
     events,
+    llm: {
+      source: result.source,
+      model: result.model,
+      reason: result.reason,
+      latencyMs: result.latencyMs,
+    },
   };
 }
