@@ -2,132 +2,156 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
-All colors MUST be HSL.
-*/
+/* City Wallet — "Cardstock & Acrylic" design system.
+   Warm paper substrate, deep teal ink, frosted-glass acrylic surfaces.
+   All colors MUST be HSL. */
+
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Newsreader:opsz,wght@6..72,400;500;600&display=swap");
 
 @layer base {
   :root {
-    /* Base surface */
-    --background: 220 30% 97%;
-    --foreground: 222 47% 11%;
+    /* Paper substrate */
+    --background: 42 23% 93%;          /* #F2EFE9 */
+    --foreground: 24 14% 10%;          /* #1C1917 */
 
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 24 14% 10%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    --popover-foreground: 24 14% 10%;
 
-    /* Brand: deep indigo "City" */
-    --primary: 235 65% 22%;
-    --primary-foreground: 210 40% 98%;
-    --primary-glow: 235 80% 60%;
+    /* Ink — deep teal */
+    --primary: 203 31% 26%;            /* #2F4858 */
+    --primary-foreground: 42 23% 93%;
+    --primary-glow: 203 31% 38%;
 
-    --secondary: 220 20% 94%;
-    --secondary-foreground: 222 47% 11%;
+    --secondary: 42 18% 88%;
+    --secondary-foreground: 24 14% 10%;
 
-    --muted: 220 20% 94%;
-    --muted-foreground: 220 12% 42%;
+    --muted: 42 15% 90%;
+    --muted-foreground: 24 7% 46%;     /* #78716C */
 
-    --accent: 35 95% 55%;
-    --accent-foreground: 222 47% 11%;
+    --accent: 203 31% 26%;
+    --accent-foreground: 42 23% 93%;
 
-    --destructive: 0 75% 55%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 65% 45%;
+    --destructive-foreground: 0 0% 100%;
 
-    --success: 152 65% 38%;
-    --success-foreground: 0 0% 100%;
+    --success: 75 60% 25%;             /* #3F6212 */
+    --success-foreground: 75 80% 90%;  /* #ECFCCB */
+    --success-bg: 75 80% 90%;
 
-    --warning: 38 95% 50%;
-    --warning-foreground: 222 47% 11%;
+    --warning: 38 95% 45%;
+    --warning-foreground: 24 14% 10%;
 
-    --border: 220 18% 88%;
-    --input: 220 18% 88%;
-    --ring: 235 65% 22%;
+    --border: 24 14% 10% / 0.08;       /* used as raw via arbitrary */
+    --border-solid: 30 10% 85%;
+    --input: 30 10% 85%;
+    --ring: 203 31% 26%;
 
-    --radius: 0.85rem;
+    --radius: 1rem;
 
-    /* Layer-specific accent colors (each system layer has its own hue) */
-    --layer-config: 220 70% 50%;       /* blue   - providers/config */
-    --layer-merchant: 28 90% 50%;      /* orange - merchant insights */
-    --layer-consumer: 280 60% 55%;     /* purple - consumer context */
-    --layer-negotiation: 195 85% 42%;  /* teal   - negotiation */
-    --layer-validation: 152 65% 38%;   /* green  - validation */
-    --layer-redemption: 340 75% 50%;   /* pink   - redemption */
+    /* Layer accents (kept for the debug panel's color-coded badges) */
+    --layer-config: 220 30% 45%;
+    --layer-merchant: 28 60% 40%;
+    --layer-consumer: 280 30% 40%;
+    --layer-negotiation: 203 31% 26%;
+    --layer-validation: 75 60% 25%;
+    --layer-redemption: 340 50% 40%;
 
-    --gradient-hero: linear-gradient(135deg, hsl(235 65% 22%), hsl(235 80% 45%) 60%, hsl(280 60% 55%));
-    --gradient-card: linear-gradient(160deg, hsl(0 0% 100%), hsl(220 30% 98%));
-    --gradient-wallet: linear-gradient(160deg, hsl(235 65% 22%), hsl(195 85% 35%));
-    --gradient-bundle: linear-gradient(135deg, hsl(35 95% 55%), hsl(15 90% 55%));
+    /* Surfaces */
+    --acrylic-start: 0 0% 100% / 0.8;
+    --acrylic-end:   0 0% 100% / 0.4;
 
-    --shadow-soft: 0 4px 16px -4px hsl(235 50% 20% / 0.10);
-    --shadow-elevated: 0 14px 40px -12px hsl(235 50% 20% / 0.22);
-    --shadow-glow: 0 0 0 1px hsl(235 80% 60% / 0.3), 0 12px 30px -10px hsl(235 80% 60% / 0.4);
+    --shadow-paper: 0 4px 20px -8px hsl(24 14% 10% / 0.08), 0 12px 40px -12px hsl(24 14% 10% / 0.10);
+    --shadow-card: 0 1px 3px hsl(24 14% 10% / 0.04), 0 4px 12px -4px hsl(24 14% 10% / 0.06);
+    --shadow-acrylic: 0 8px 32px hsl(24 14% 10% / 0.04), inset 0 1px 0 0 hsl(0 0% 100% / 0.6);
+    --inset-paper: inset 0 2px 10px hsl(24 14% 10% / 0.03);
 
     --transition-smooth: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 
-    --sidebar-background: 0 0% 98%;
-
-    --sidebar-foreground: 240 5.3% 26.1%;
-
-    --sidebar-primary: 240 5.9% 10%;
-
-    --sidebar-primary-foreground: 0 0% 98%;
-
-    --sidebar-accent: 240 4.8% 95.9%;
-
-    --sidebar-accent-foreground: 240 5.9% 10%;
-
-    --sidebar-border: 220 13% 91%;
-
-    --sidebar-ring: 217.2 91.2% 59.8%;
+    --sidebar-background: 42 23% 93%;
+    --sidebar-foreground: 24 14% 10%;
+    --sidebar-primary: 203 31% 26%;
+    --sidebar-primary-foreground: 42 23% 93%;
+    --sidebar-accent: 42 18% 88%;
+    --sidebar-accent-foreground: 24 14% 10%;
+    --sidebar-border: 30 10% 85%;
+    --sidebar-ring: 203 31% 26%;
   }
 
   .dark {
-    --background: 224 35% 8%;
+    /* Dark mode is intentionally not tuned — City Wallet is a paper-based brand. */
+    --background: 24 14% 10%;
     --foreground: 210 40% 98%;
-
-    --card: 222.2 84% 4.9%;
+    --card: 24 14% 12%;
     --card-foreground: 210 40% 98%;
-
-    --popover: 222.2 84% 4.9%;
+    --popover: 24 14% 12%;
     --popover-foreground: 210 40% 98%;
-
-    --primary: 210 40% 98%;
-    --primary-foreground: 222.2 47.4% 11.2%;
-
-    --secondary: 217.2 32.6% 17.5%;
+    --primary: 203 31% 70%;
+    --primary-foreground: 24 14% 10%;
+    --secondary: 24 14% 16%;
     --secondary-foreground: 210 40% 98%;
-
-    --muted: 217.2 32.6% 17.5%;
+    --muted: 24 14% 16%;
     --muted-foreground: 215 20.2% 65.1%;
-
-    --accent: 217.2 32.6% 17.5%;
+    --accent: 24 14% 16%;
     --accent-foreground: 210 40% 98%;
-
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
-
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
+    --border-solid: 24 14% 22%;
+    --input: 24 14% 22%;
     --ring: 212.7 26.8% 83.9%;
-    --sidebar-background: 240 5.9% 10%;
-    --sidebar-foreground: 240 4.8% 95.9%;
-    --sidebar-primary: 224.3 76.3% 48%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 240 3.7% 15.9%;
-    --sidebar-accent-foreground: 240 4.8% 95.9%;
-    --sidebar-border: 240 3.7% 15.9%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
   }
 }
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: hsl(var(--border-solid));
   }
 
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-family: "Instrument Sans", system-ui, sans-serif;
+    background-image: radial-gradient(circle at top right, hsl(203 31% 26% / 0.03), transparent 40%);
+    background-attachment: fixed;
+  }
+
+  h1, h2, h3, .font-serif {
+    font-family: "Newsreader", Georgia, serif;
+    font-feature-settings: "ss01";
+  }
+
+  .font-mono, code, pre, kbd {
+    font-family: "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .surface-acrylic {
+    background: linear-gradient(135deg, hsl(0 0% 100% / 0.8), hsl(0 0% 100% / 0.4));
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: var(--shadow-acrylic);
+    border: 1px solid hsl(0 0% 100% / 0.6);
+  }
+  .surface-card {
+    background: hsl(var(--card));
+    box-shadow: var(--shadow-card);
+    border: 1px solid hsl(24 14% 10% / 0.05);
+  }
+  .surface-paper {
+    background: hsl(var(--background) / 0.5);
+    box-shadow: var(--inset-paper);
+  }
+  .ink-mark {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+  .label-tag {
+    @apply font-mono text-[10px] uppercase tracking-[0.18em] px-2 py-0.5 rounded-sm;
   }
 }
