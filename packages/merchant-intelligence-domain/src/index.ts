@@ -1172,40 +1172,47 @@ async function compileWithAzureOpenAI(
   if (!endpoint || !deployment || !apiVersion || !apiKey) return null;
 
   const url = `${endpoint.replace(/\/$/, "")}/openai/deployments/${deployment}/chat/completions?api-version=${encodeURIComponent(apiVersion)}`;
+  const compileBody: Record<string, unknown> = {
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: [
+          "Compile merchant free-form rules into supported City Wallet merchant rule patches.",
+          "Return strict JSON with keys summary, staticRulePatch, unsupportedRules.",
+          "staticRulePatch may only include maxDiscountPercent, dailyBudgetEuro, dailyBudgetRemainingEuro, eligibleProducts, allowsBundles, preferredBundleCategories, offerTypesAllowed, brandTone.",
+          "Do not invent values that are not present or strongly implied. Put unsupported instructions in unsupportedRules.",
+        ].join(" "),
+      },
+      {
+        role: "user",
+        content: JSON.stringify({
+          merchant: {
+            id: merchant.id,
+            name: merchant.name,
+            category: merchant.category,
+            products: merchant.products.map((product) => product.name),
+          },
+          currentRule: baseRule,
+          freeformRulesText: text,
+        }),
+      },
+    ],
+  };
+  // Only forward `temperature` when explicitly opted in. Reasoning-class
+  // Azure deployments (o1/o3/gpt-5) reject any non-default temperature.
+  const tempRaw = process.env.AZURE_OPENAI_TEMPERATURE;
+  if (tempRaw !== undefined && tempRaw !== "") {
+    const parsed = Number(tempRaw);
+    if (Number.isFinite(parsed)) compileBody.temperature = parsed;
+  }
   const response = await withTimeout(fetch(url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
       "api-key": apiKey,
     },
-    body: JSON.stringify({
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: [
-            "Compile merchant free-form rules into supported City Wallet merchant rule patches.",
-            "Return strict JSON with keys summary, staticRulePatch, unsupportedRules.",
-            "staticRulePatch may only include maxDiscountPercent, dailyBudgetEuro, dailyBudgetRemainingEuro, eligibleProducts, allowsBundles, preferredBundleCategories, offerTypesAllowed, brandTone.",
-            "Do not invent values that are not present or strongly implied. Put unsupported instructions in unsupportedRules.",
-          ].join(" "),
-        },
-        {
-          role: "user",
-          content: JSON.stringify({
-            merchant: {
-              id: merchant.id,
-              name: merchant.name,
-              category: merchant.category,
-              products: merchant.products.map((product) => product.name),
-            },
-            currentRule: baseRule,
-            freeformRulesText: text,
-          }),
-        },
-      ],
-    }),
+    body: JSON.stringify(compileBody),
   }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 15_000), "Azure OpenAI rule compiler");
   if (!response.ok) throw new Error(`Azure OpenAI ${response.status}: ${await response.text()}`);
   const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };

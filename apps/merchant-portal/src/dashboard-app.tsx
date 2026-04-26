@@ -850,6 +850,146 @@ export function DashboardApp() {
         </div>
       )}
 
+      <div className="mt-6 grid gap-5 lg:grid-cols-2">
+        <div className="rounded-2xl border border-black/10 bg-paper p-5">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-serif text-xl">Latest user context (LLM-assembled)</h2>
+            <Badge tone={metrics?.latestAssembledUserContext ? "green" : "neutral"}>
+              {metrics?.latestAssembledUserContext ? "available" : metrics?.latestNoOfferReason ?? "none"}
+            </Badge>
+          </div>
+          {metrics?.latestAssembledUserContext ? (
+            <div className="space-y-2 text-sm">
+              <p>
+                <span className="text-ink-muted">Inferred intent:</span>{" "}
+                {metrics.latestAssembledUserContext.inferredIntent}
+              </p>
+              <p>
+                <span className="text-ink-muted">Mood / energy:</span>{" "}
+                {metrics.latestAssembledUserContext.moodState} ·{" "}
+                {metrics.latestAssembledUserContext.energyState}
+              </p>
+              <p>
+                <span className="text-ink-muted">Time / attention:</span>{" "}
+                {metrics.latestAssembledUserContext.timeContext} ·{" "}
+                {metrics.latestAssembledUserContext.attentionState}
+              </p>
+              <p>
+                <span className="text-ink-muted">Walking tolerance:</span>{" "}
+                {metrics.latestAssembledUserContext.walkingToleranceMeters}m
+              </p>
+              <p>
+                <span className="text-ink-muted">Confidence:</span>{" "}
+                {metrics.latestAssembledUserContext.confidence}
+              </p>
+              {metrics.latestAssembledUserContext.likelyGoodCategories.length ? (
+                <p>
+                  <span className="text-ink-muted">Likely good:</span>{" "}
+                  {metrics.latestAssembledUserContext.likelyGoodCategories.join(", ")}
+                </p>
+              ) : null}
+              {metrics.latestAssembledUserContext.avoidCategories.length ? (
+                <p>
+                  <span className="text-ink-muted">Avoid:</span>{" "}
+                  {metrics.latestAssembledUserContext.avoidCategories.join(", ")}
+                </p>
+              ) : null}
+              <p className="text-ink-muted">"{metrics.latestAssembledUserContext.currentStateSummary}"</p>
+            </div>
+          ) : (
+            <p className="text-sm text-ink-muted">No assembled context yet. Trigger the wallet pipeline to populate this.</p>
+          )}
+          <div className="mt-4">
+            <JsonPanel title="Assembled user context (raw)" data={metrics?.latestAssembledUserContext ?? null} />
+          </div>
+        </div>
+
+        <div className="rounded-2xl border border-black/10 bg-paper p-5">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-serif text-xl">User negotiation position (LLM)</h2>
+            <Badge tone={metrics?.latestUserNegotiationPosition?.shouldNegotiate ? "green" : "orange"}>
+              {metrics?.latestUserNegotiationPosition
+                ? metrics.latestUserNegotiationPosition.shouldNegotiate
+                  ? "negotiate"
+                  : "skip"
+                : "n/a"}
+            </Badge>
+          </div>
+          {metrics?.latestUserNegotiationPosition ? (
+            <div className="space-y-2 text-sm">
+              <p>
+                <span className="text-ink-muted">Utility goal:</span>{" "}
+                {metrics.latestUserNegotiationPosition.userUtilityGoal}
+              </p>
+              <p>
+                <span className="text-ink-muted">Acceptance threshold:</span>{" "}
+                {metrics.latestUserNegotiationPosition.acceptanceThreshold}
+              </p>
+              <p>
+                <span className="text-ink-muted">Max walking / stops:</span>{" "}
+                {metrics.latestUserNegotiationPosition.hardConstraints.maxWalkingMeters}m ·{" "}
+                {metrics.latestUserNegotiationPosition.hardConstraints.maxStops} stops
+              </p>
+              <p>
+                <span className="text-ink-muted">Reward / tone:</span>{" "}
+                {metrics.latestUserNegotiationPosition.softPreferences.rewardType} ·{" "}
+                {metrics.latestUserNegotiationPosition.softPreferences.tone}
+              </p>
+              <p>
+                <span className="text-ink-muted">Bundle preference:</span>{" "}
+                {metrics.latestUserNegotiationPosition.softPreferences.bundlePreference}
+              </p>
+              {metrics.latestUserNegotiationPosition.softPreferences.preferredCategories.length ? (
+                <p>
+                  <span className="text-ink-muted">Prefers:</span>{" "}
+                  {metrics.latestUserNegotiationPosition.softPreferences.preferredCategories.join(", ")}
+                </p>
+              ) : null}
+              {metrics.latestUserNegotiationPosition.softPreferences.avoidCategories.length ? (
+                <p>
+                  <span className="text-ink-muted">Avoid:</span>{" "}
+                  {metrics.latestUserNegotiationPosition.softPreferences.avoidCategories.join(", ")}
+                </p>
+              ) : null}
+              <p className="text-ink-muted">
+                "{metrics.latestUserNegotiationPosition.negotiationStance.minimumRelevanceReason}"
+              </p>
+            </div>
+          ) : (
+            <p className="text-sm text-ink-muted">No user negotiation position yet.</p>
+          )}
+          <div className="mt-4">
+            <JsonPanel title="User negotiation position (raw)" data={metrics?.latestUserNegotiationPosition ?? null} />
+          </div>
+        </div>
+      </div>
+
+      <div className="mt-6 rounded-2xl border border-black/10 bg-paper p-5">
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="font-serif text-xl">Latest negotiation reasoning</h2>
+          <Badge tone="purple">{metrics?.latestNegotiationReasoning?.length ?? 0} steps</Badge>
+        </div>
+        {metrics?.latestNegotiationReasoning?.length ? (
+          <ol className="space-y-2 text-sm">
+            {metrics.latestNegotiationReasoning.map((line, index) => (
+              <li key={`${line}-${index}`} className="flex gap-2">
+                <span className="font-mono text-xs text-ink-muted">{String(index + 1).padStart(2, "0")}</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-sm text-ink-muted">
+            {metrics?.latestNoOfferReason
+              ? `Latest run produced no offer: ${metrics.latestNoOfferReason}.`
+              : "No backend negotiation reasoning recorded yet."}
+          </p>
+        )}
+        <div className="mt-4">
+          <JsonPanel title="Agent trace (assembler + user negotiator)" data={metrics?.latestAgentTrace ?? null} />
+        </div>
+      </div>
+
       <div className="mt-6 grid gap-5 lg:grid-cols-[1fr_420px]">
         <ExplainabilityPanel title="Merchant explainability">
           <div className="space-y-4">

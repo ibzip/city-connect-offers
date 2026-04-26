@@ -278,3 +278,36 @@ model OrchestrationRun {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 }
+
+model MockContextProfile {
+  id                    String   @id
+  userId                String
+  name                  String
+  enabledSourcesJson    String
+  signalPayloadsJson    String
+  profileOverridesJson  String?
+  activeScenario        String?
+  isActive              Boolean  @default(false)
+  version               Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([userId])
+  @@index([userId, isActive])
+}
+
+model UserContextAgentRun {
+  id                String   @id
+  userId            String
+  contextSnapshotId String
+  stage             String
+  provider          String
+  model             String?
+  latencyMs         Int?
+  validationStatus  String
+  errorType         String?
+  outputJson        String?
+  createdAt         DateTime @default(now())
+
+  @@index([userId, createdAt])
+}

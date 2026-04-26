@@ -4,6 +4,7 @@ import type {
   ActivateCommerceZoneRequest,
   ActivateCommerceZoneResult,
   AnalyticsEventType,
+  AssembledUserContext,
   CitySuggestion,
   ConsumerAgentPosition,
   ConsumerContextSnapshot,
@@ -21,6 +22,7 @@ import type {
   RedemptionResult,
   RedemptionToken,
   UserEvent,
+  UserNegotiationPosition,
   ValidationResult,
 } from "@city-wallet/contracts";
 import type { CityWalletRepository } from "@city-wallet/db";
@@ -148,6 +150,8 @@ export class NegotiationServiceClient {
     consumerAgentPosition: ConsumerAgentPosition;
     merchants: Merchant[];
     merchantInsights: Awaited<ReturnType<CityWalletRepository["listMerchantInsights"]>>;
+    assembledUserContext?: AssembledUserContext | null;
+    userNegotiationPosition?: UserNegotiationPosition | null;
   }) {
     if (getServiceInvocationMode(this.baseUrl) === "http") {
       return postJson<{
@@ -157,12 +161,17 @@ export class NegotiationServiceClient {
         negotiationDecision: NegotiationDecision;
       }>(`${this.baseUrl}/api/negotiate`, input);
     }
-    const candidateMerchants = selectCandidateMerchants(input.merchants, input.merchantInsights, input.consumerContext);
+    const candidateMerchants = selectCandidateMerchants(input.merchants, input.merchantInsights, input.consumerContext, {
+      userNegotiationPosition: input.userNegotiationPosition,
+      assembledUserContext: input.assembledUserContext,
+    });
     const bundleCandidates = buildBundleCandidates(input.merchants, candidateMerchants, input.merchantInsights, input.consumerContext);
     const negotiationBrief = buildNegotiationBrief({
       userEvent: input.userEvent,
       consumerContext: input.consumerContext,
       consumerAgentPosition: input.consumerAgentPosition,
+      assembledUserContext: input.assembledUserContext,
+      userNegotiationPosition: input.userNegotiationPosition,
       merchantInsights: input.merchantInsights,
       candidateMerchants,
       bundleCandidates,

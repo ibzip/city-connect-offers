@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const SignalSourceTypeSchema = z.enum(["real", "simulated", "hybrid"]);
+export const SignalSourceTypeSchema = z.enum(["real", "simulated", "hybrid", "fallback"]);
 export type SignalSourceType = z.infer<typeof SignalSourceTypeSchema>;
 
 export const NormalizedSignalSchema = <TPayload extends z.ZodTypeAny>(payloadSchema: TPayload) =>
@@ -29,6 +29,9 @@ export const UserEventTypeSchema = z.enum([
   "UserDeclaredContextChanged",
   "TimeContextChanged",
   "WeatherContextChanged",
+  "UserContextSignalsChanged",
+  "AppReturnedToForeground",
+  "ManualRefreshRequested",
 ]);
 export type UserEventType = z.infer<typeof UserEventTypeSchema>;
 
@@ -222,6 +225,17 @@ export const UserProfileSchema = z.object({
   maxOffersPerHour: z.number().int().positive(),
 });
 export type UserProfile = z.infer<typeof UserProfileSchema>;
+
+// Subset of UserProfile fields the wallet's Preferences sheet can update.
+// userId/displayName are immutable from this surface.
+export const UserProfileUpdateSchema = z.object({
+  privacyMode: z.enum(["low", "medium", "high"]).optional(),
+  rewardPreference: z.enum(["cashback", "discount", "either"]).optional(),
+  walkingToleranceMeters: z.number().int().min(50).max(5_000).optional(),
+  maxBundleStops: z.number().int().min(1).max(5).optional(),
+  maxOffersPerHour: z.number().int().min(1).max(10).optional(),
+});
+export type UserProfileUpdate = z.infer<typeof UserProfileUpdateSchema>;
 
 export const UserEventSchema = z.object({
   eventId: z.string(),
@@ -450,6 +464,8 @@ export const NegotiationBriefSchema = z.object({
   userEvent: UserEventSchema,
   consumerContext: ConsumerContextSnapshotSchema,
   consumerAgentPosition: ConsumerAgentPositionSchema,
+  assembledUserContext: z.lazy(() => AssembledUserContextSchema).nullable().optional(),
+  userNegotiationPosition: z.lazy(() => UserNegotiationPositionSchema).nullable().optional(),
   merchantInsights: z.array(MerchantInsightSnapshotSchema),
   candidateMerchants: z.array(CandidateMerchantSchema),
   bundleCandidates: z.array(BundleCandidateSchema),
@@ -595,13 +611,35 @@ export const AnalyticsEventTypeSchema = z.enum([
   "cashback_issued",
   "offer_dismissed",
   "offer_expired",
+  "user_context_assembled",
+  "user_context_assembler_failed",
+  "user_context_assembler_skipped",
+  "user_negotiator_position_built",
+  "user_negotiator_failed",
+  "user_negotiator_skipped",
+  "user_negotiator_declined",
+  "backend_negotiator_failed",
+  "no_offer_emitted",
 ]);
 export type AnalyticsEventType = z.infer<typeof AnalyticsEventTypeSchema>;
 
 export const AnalyticsEventSchema = z.object({
   eventId: z.string(),
   type: AnalyticsEventTypeSchema,
-  layer: z.enum(["config", "providers", "context", "consumer_agent", "merchant_intelligence", "negotiation", "validation", "offer", "redemption", "analytics"]),
+  layer: z.enum([
+    "config",
+    "providers",
+    "context",
+    "consumer_agent",
+    "raw_context",
+    "user_agent",
+    "merchant_intelligence",
+    "negotiation",
+    "validation",
+    "offer",
+    "redemption",
+    "analytics",
+  ]),
   message: z.string(),
   merchantId: z.string().optional(),
   offerId: z.string().optional(),
@@ -655,12 +693,503 @@ export const DashboardMetricsSchema = z.object({
   zones: z.array(CommerceZoneSchema).default([]),
   importRuns: z.array(MerchantImportRunSchema).default([]),
   currentContext: ConsumerContextSnapshotSchema.nullable().optional(),
+  latestAssembledUserContext: z.lazy(() => AssembledUserContextSchema).nullable().optional(),
+  latestUserNegotiationPosition: z.lazy(() => UserNegotiationPositionSchema).nullable().optional(),
+  latestAgentTrace: z.lazy(() => AgentTraceSchema).optional(),
+  latestNegotiationReasoning: z.array(z.string()).default([]),
+  latestNoOfferReason: z.lazy(() => NoOfferReasonSchema).nullable().optional(),
   events: z.array(AnalyticsEventSchema),
 });
 export type DashboardMetrics = z.infer<typeof DashboardMetricsSchema>;
 
+export const RawContextSourceSchema = z.enum([
+  "calendar",
+  "fitness",
+  "mobility",
+  "mood",
+  "payment_preference",
+  "social",
+  "transit",
+  "dietary",
+  "device_attention",
+  "local_events",
+  "location",
+  "active_zone",
+  "weather",
+  "time",
+  "merchant_density",
+]);
+export type RawContextSource = z.infer<typeof RawContextSourceSchema>;
+
+export const CalendarSignalPayloadSchema = z.object({
+  freeWindowMinutes: z.number().int().nonnegative().optional(),
+  nextEventInMinutes: z.number().int().nonnegative().optional(),
+  nextEventType: z.enum(["work", "personal", "social", "travel", "unknown"]).optional(),
+  dayLoad: z.enum(["light", "medium", "heavy"]).optional(),
+  hasHardStop: z.boolean().optional(),
+  locationHint: z.enum(["nearby", "remote", "unknown"]).optional(),
+});
+export type CalendarSignalPayload = z.infer<typeof CalendarSignalPayloadSchema>;
+
+export const FitnessSignalPayloadSchema = z.object({
+  sleepQuality: z.enum(["poor", "okay", "good"]).optional(),
+  energyLevel: z.enum(["low", "medium", "high"]).optional(),
+  recentWorkout: z.boolean().optional(),
+  recoveryNeed: z.enum(["low", "medium", "high"]).optional(),
+  activityLoadToday: z.enum(["low", "medium", "high"]).optional(),
+});
+export type FitnessSignalPayload = z.infer<typeof FitnessSignalPayloadSchema>;
+
+export const MobilitySignalPayloadSchema = z.object({
+  movementState: z.enum([
+    "stationary",
+    "walking_slowly",
+    "walking_fast",
+    "cycling",
+    "driving",
+    "public_transport",
+  ]).optional(),
+  dwellPattern: z.enum(["browsing", "commuting", "waiting", "unknown"]).optional(),
+  familiarity: z.enum(["familiar_area", "unfamiliar_area", "tourist_mode"]).optional(),
+  distanceFromHomeKm: z.number().nonnegative().optional(),
+  distanceFromWorkKm: z.number().nonnegative().optional(),
+});
+export type MobilitySignalPayload = z.infer<typeof MobilitySignalPayloadSchema>;
+
+export const MoodSignalPayloadSchema = z.object({
+  moodState: z.enum(["calm", "stressed", "tired", "social", "celebratory", "focused", "unknown"]).optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  basis: z.array(z.string()).default([]),
+});
+export type MoodSignalPayload = z.infer<typeof MoodSignalPayloadSchema>;
+
+export const PaymentPreferenceSignalPayloadSchema = z.object({
+  rewardPreference: z.enum(["cashback", "discount", "convenience", "discovery", "premium"]).optional(),
+  priceSensitivity: z.enum(["low", "medium", "high"]).optional(),
+  categoryAffinities: z.array(z.string()).default([]),
+  recentCategoryAvoidance: z.array(z.string()).default([]),
+});
+export type PaymentPreferenceSignalPayload = z.infer<typeof PaymentPreferenceSignalPayloadSchema>;
+
+export const SocialSignalPayloadSchema = z.object({
+  socialMode: z.enum(["solo", "friend_meetup", "date", "family", "group", "unknown"]).optional(),
+  groupSize: z.number().int().nonnegative().optional(),
+  nextSocialCommitmentInMinutes: z.number().int().nonnegative().optional(),
+});
+export type SocialSignalPayload = z.infer<typeof SocialSignalPayloadSchema>;
+
+export const TransitSignalPayloadSchema = z.object({
+  transitState: z.enum([
+    "none",
+    "waiting_for_train",
+    "delayed_train",
+    "near_station",
+    "arrived_early",
+    "has_luggage",
+  ]).optional(),
+  departureInMinutes: z.number().int().nonnegative().optional(),
+  delayMinutes: z.number().int().nonnegative().optional(),
+});
+export type TransitSignalPayload = z.infer<typeof TransitSignalPayloadSchema>;
+
+export const DietarySignalPayloadSchema = z.object({
+  dietaryHints: z.array(z.enum(["vegetarian", "vegan", "halal", "gluten_free", "none"])).default([]),
+  avoidFoodCategories: z.array(z.string()).default([]),
+  preferredFoodStyle: z.enum(["light", "hearty", "sweet", "healthy", "unknown"]).optional(),
+});
+export type DietarySignalPayload = z.infer<typeof DietarySignalPayloadSchema>;
+
+export const DeviceAttentionSignalPayloadSchema = z.object({
+  screenActive: z.boolean().optional(),
+  focusMode: z.boolean().optional(),
+  batteryLevel: z.enum(["low", "medium", "high"]).optional(),
+  headphonesConnected: z.boolean().optional(),
+  notificationTolerance: z.enum(["low", "medium", "high"]).optional(),
+});
+export type DeviceAttentionSignalPayload = z.infer<typeof DeviceAttentionSignalPayloadSchema>;
+
+export const LocalEventsSignalPayloadSchema = z.object({
+  nearbyEventType: z.enum([
+    "none",
+    "concert",
+    "sports",
+    "festival",
+    "market",
+    "museum_event",
+    "conference",
+  ]).optional(),
+  eventWindow: z.enum(["pre_event", "during_event", "post_event", "none"]).optional(),
+  crowdLevel: z.enum(["low", "medium", "high"]).optional(),
+});
+export type LocalEventsSignalPayload = z.infer<typeof LocalEventsSignalPayloadSchema>;
+
+export const RawContextSignalSchema = z.object({
+  signalId: z.string(),
+  source: RawContextSourceSchema,
+  sourceType: SignalSourceTypeSchema,
+  observedAt: z.string(),
+  confidence: z.number().min(0).max(1),
+  payload: z.record(z.unknown()),
+});
+export type RawContextSignal = z.infer<typeof RawContextSignalSchema>;
+
+export const PrivacyMetadataSchema = z.object({
+  usedSources: z.array(z.string()).default([]),
+  withheldSensitiveSources: z.array(z.string()).default([]),
+  privacyNotes: z.array(z.string()).default([]),
+});
+export type PrivacyMetadata = z.infer<typeof PrivacyMetadataSchema>;
+
+export const PrivacyFilteredBundleSchema = z.object({
+  signals: z.array(RawContextSignalSchema).default([]),
+  metadata: PrivacyMetadataSchema,
+});
+export type PrivacyFilteredBundle = z.infer<typeof PrivacyFilteredBundleSchema>;
+
+export const InferredIntentSchema = z.enum([
+  "warm_city_break",
+  "quick_lunch",
+  "healthy_recovery",
+  "post_workout_refuel",
+  "quiet_focus_place",
+  "rainy_day_indoor",
+  "gift_on_the_way",
+  "date_night_prep",
+  "tourist_discovery",
+  "waiting_for_train",
+  "pre_event_meal",
+  "post_event_treat",
+  "errand_bundle",
+  "family_snack_stop",
+  "low_energy_comfort",
+  "social_meetup",
+  "budget_friendly_find",
+  "premium_local_discovery",
+  "no_clear_intent",
+]);
+export type InferredIntent = z.infer<typeof InferredIntentSchema>;
+
+export const HungerStateSchema = z.enum(["not_hungry", "maybe_hungry", "likely_hungry", "unknown"]);
+export type HungerState = z.infer<typeof HungerStateSchema>;
+
+export const UserMoodStateSchema = z.enum([
+  "calm",
+  "stressed",
+  "tired",
+  "social",
+  "celebratory",
+  "focused",
+  "unknown",
+]);
+export type UserMoodState = z.infer<typeof UserMoodStateSchema>;
+
+export const EnergyStateSchema = z.enum(["low", "medium", "high", "unknown"]);
+export type EnergyState = z.infer<typeof EnergyStateSchema>;
+
+export const AttentionStateSchema = z.enum([
+  "do_not_interrupt",
+  "low_attention",
+  "interruptible_if_high_relevance",
+  "high",
+]);
+export type AttentionState = z.infer<typeof AttentionStateSchema>;
+
+export const TimeContextStateSchema = z.enum([
+  "rushed",
+  "short_gap",
+  "medium_gap",
+  "open_window",
+  "waiting",
+  "commuting",
+  "unknown",
+]);
+export type TimeContextState = z.infer<typeof TimeContextStateSchema>;
+
+export const TimeSensitivitySchema = z.enum(["low", "medium", "high"]);
+export type TimeSensitivity = z.infer<typeof TimeSensitivitySchema>;
+
+export const PreferredOfferStyleSchema = z.enum([
+  "factual",
+  "gentle_situational",
+  "playful",
+  "premium",
+  "minimal",
+]);
+export type PreferredOfferStyle = z.infer<typeof PreferredOfferStyleSchema>;
+
+export const AssembledUserContextSchema = z.object({
+  contextSnapshotId: z.string(),
+  userId: z.string(),
+  currentStateSummary: z.string(),
+  inferredIntent: InferredIntentSchema,
+  confidence: z.number().min(0).max(1),
+  hungerState: HungerStateSchema,
+  moodState: UserMoodStateSchema,
+  energyState: EnergyStateSchema,
+  attentionState: AttentionStateSchema,
+  timeContext: TimeContextStateSchema,
+  timeSensitivity: TimeSensitivitySchema,
+  freeWindowMinutes: z.number().int().nonnegative().optional(),
+  walkingToleranceMeters: z.number().int().nonnegative(),
+  preferredOfferStyle: PreferredOfferStyleSchema,
+  likelyGoodCategories: z.array(z.string()).default([]),
+  avoidCategories: z.array(z.string()).default([]),
+  evidence: z.array(z.string()).default([]),
+  privacyNotes: z.array(z.string()).default([]),
+  sourceSignalSummary: z.object({
+    usedSources: z.array(z.string()).default([]),
+    withheldSensitiveSources: z.array(z.string()).default([]),
+  }),
+});
+export type AssembledUserContext = z.infer<typeof AssembledUserContextSchema>;
+
+export const UserUtilityGoalSchema = z.enum([
+  "useful_local_offer_without_spam",
+  "save_money",
+  "discover_local_places",
+  "minimize_walking",
+  "comfort_break",
+  "healthy_choice",
+  "time_efficient_errand",
+  "no_offer_preferred",
+]);
+export type UserUtilityGoal = z.infer<typeof UserUtilityGoalSchema>;
+
+export const NegotiatorRewardTypeSchema = z.enum([
+  "cashback",
+  "discount",
+  "convenience",
+  "discovery",
+  "premium",
+]);
+export type NegotiatorRewardType = z.infer<typeof NegotiatorRewardTypeSchema>;
+
+export const BundlePreferenceSchema = z.enum([
+  "single_stop",
+  "coherent_short_journey",
+  "multi_stop_ok",
+  "no_bundle",
+]);
+export type BundlePreference = z.infer<typeof BundlePreferenceSchema>;
+
+export const UserNegotiationPositionSchema = z.object({
+  userId: z.string(),
+  contextSnapshotId: z.string(),
+  shouldNegotiate: z.boolean(),
+  userUtilityGoal: UserUtilityGoalSchema,
+  acceptanceThreshold: z.number().min(0).max(100),
+  hardConstraints: z.object({
+    maxWalkingMeters: z.number().int().nonnegative(),
+    maxStops: z.number().int().positive(),
+    maxOffersPerHour: z.number().int().positive(),
+    rawPersonalDataShared: z.boolean(),
+    allowSensitiveInference: z.boolean(),
+  }),
+  softPreferences: z.object({
+    rewardType: NegotiatorRewardTypeSchema,
+    tone: PreferredOfferStyleSchema,
+    preferredCategories: z.array(z.string()).default([]),
+    avoidCategories: z.array(z.string()).default([]),
+    bundlePreference: BundlePreferenceSchema,
+  }),
+  negotiationStance: z.object({
+    allowSingleOffer: z.boolean(),
+    allowBundle: z.boolean(),
+    preferNoOfferIfWeakFit: z.boolean(),
+    minimumRelevanceReason: z.string(),
+  }),
+  evidence: z.array(z.string()).default([]),
+  confidence: z.number().min(0).max(1),
+});
+export type UserNegotiationPosition = z.infer<typeof UserNegotiationPositionSchema>;
+
+export const NoOfferReasonSchema = z.enum([
+  "user_negotiator_declined",
+  "weak_fit",
+  "agent_failed",
+  "agent_skipped",
+  "cooldown",
+  "active_offer_exists",
+  "no_candidates",
+  "validation_failed",
+  "negotiator_returned_no_offer",
+]);
+export type NoOfferReason = z.infer<typeof NoOfferReasonSchema>;
+
+export const AgentStageSchema = z.enum(["assembler", "user_negotiator"]);
+export type AgentStage = z.infer<typeof AgentStageSchema>;
+
+export const AgentRunMetaSchema = z.object({
+  provider: z.enum(["azure_openai", "skipped"]),
+  model: z.string().optional(),
+  latencyMs: z.number().int().nonnegative().optional(),
+  validationStatus: z.enum(["ok", "repaired", "failed", "skipped"]),
+  errorType: z.string().optional(),
+});
+export type AgentRunMeta = z.infer<typeof AgentRunMetaSchema>;
+
+export const AgentTraceSchema = z.object({
+  assembler: AgentRunMetaSchema.nullable(),
+  userNegotiator: AgentRunMetaSchema.nullable(),
+});
+export type AgentTrace = z.infer<typeof AgentTraceSchema>;
+
+export const UserContextAgentRunSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  contextSnapshotId: z.string(),
+  stage: AgentStageSchema,
+  provider: z.enum(["azure_openai", "skipped"]),
+  model: z.string().nullable().optional(),
+  latencyMs: z.number().int().nonnegative().nullable().optional(),
+  validationStatus: z.enum(["ok", "repaired", "failed", "skipped"]),
+  errorType: z.string().nullable().optional(),
+  outputJson: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type UserContextAgentRun = z.infer<typeof UserContextAgentRunSchema>;
+
+export const MockContextSourceKeySchema = z.enum([
+  "calendar",
+  "fitness",
+  "mobility",
+  "mood",
+  "payment_preference",
+  "social",
+  "transit",
+  "dietary",
+  "device_attention",
+  "local_events",
+]);
+export type MockContextSourceKey = z.infer<typeof MockContextSourceKeySchema>;
+
+export const MockContextScenarioSchema = z.enum([
+  "heavy_workday_30min_gap_cold",
+  "post_workout_healthy_refuel",
+  "date_night_soon",
+  "waiting_for_train",
+  "tourist_exploring",
+  "low_energy_poor_sleep",
+  "social_meetup",
+  "budget_conscious_errand_run",
+  "quiet_focus_break",
+  "gift_on_the_way",
+]);
+export type MockContextScenario = z.infer<typeof MockContextScenarioSchema>;
+
+// Optional per-scenario / per-mock-profile overrides that the orchestrator
+// applies on top of the user's persisted profile and context snapshot.
+//
+// These are TRANSIENT - they only take effect while the mock profile is
+// active in the dev simulator. They never overwrite the user's saved profile.
+// Their purpose is to make scenarios actually steer constraints (e.g. a
+// "tourist" scenario widens walking tolerance and lengthens available time),
+// not just decorate the assembler's signal payloads.
+export const MockContextProfileOverridesSchema = z.object({
+  walkingToleranceMeters: z.number().int().min(50).max(10_000).optional(),
+  maxBundleStops: z.number().int().min(1).max(5).optional(),
+  maxOffersPerHour: z.number().int().min(1).max(10).optional(),
+  rewardPreference: z.enum(["cashback", "discount", "either"]).optional(),
+  privacyMode: z.enum(["low", "medium", "high"]).optional(),
+  declaredIntent: z.string().optional(),
+  availableMinutes: z.number().int().min(5).max(480).optional(),
+});
+export type MockContextProfileOverrides = z.infer<typeof MockContextProfileOverridesSchema>;
+
+export const MockContextProfileSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  name: z.string(),
+  enabledSources: z.record(z.boolean()).default({}),
+  signalPayloads: z.object({
+    calendar: CalendarSignalPayloadSchema.optional(),
+    fitness: FitnessSignalPayloadSchema.optional(),
+    mobility: MobilitySignalPayloadSchema.optional(),
+    mood: MoodSignalPayloadSchema.optional(),
+    payment_preference: PaymentPreferenceSignalPayloadSchema.optional(),
+    social: SocialSignalPayloadSchema.optional(),
+    transit: TransitSignalPayloadSchema.optional(),
+    dietary: DietarySignalPayloadSchema.optional(),
+    device_attention: DeviceAttentionSignalPayloadSchema.optional(),
+    local_events: LocalEventsSignalPayloadSchema.optional(),
+  }).default({}),
+  profileOverrides: MockContextProfileOverridesSchema.optional(),
+  activeScenario: MockContextScenarioSchema.nullable().optional(),
+  isActive: z.boolean().default(false),
+  version: z.number().int().nonnegative().default(0),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type MockContextProfile = z.infer<typeof MockContextProfileSchema>;
+
+export const ConnectedSourceChipStatusSchema = z.enum([
+  "connected",
+  "not_connected",
+  "simulated_for_demo",
+]);
+export type ConnectedSourceChipStatus = z.infer<typeof ConnectedSourceChipStatusSchema>;
+
+export const ConnectedSourceChipSchema = z.object({
+  source: z.string(),
+  label: z.string(),
+  status: ConnectedSourceChipStatusSchema,
+  privacyNote: z.string().optional(),
+});
+export type ConnectedSourceChip = z.infer<typeof ConnectedSourceChipSchema>;
+
+export const MockContextProfileUpsertSchema = z.object({
+  id: z.string().optional(),
+  userId: z.string(),
+  name: z.string().min(1),
+  enabledSources: z.record(z.boolean()).default({}),
+  signalPayloads: z.object({
+    calendar: CalendarSignalPayloadSchema.optional(),
+    fitness: FitnessSignalPayloadSchema.optional(),
+    mobility: MobilitySignalPayloadSchema.optional(),
+    mood: MoodSignalPayloadSchema.optional(),
+    payment_preference: PaymentPreferenceSignalPayloadSchema.optional(),
+    social: SocialSignalPayloadSchema.optional(),
+    transit: TransitSignalPayloadSchema.optional(),
+    dietary: DietarySignalPayloadSchema.optional(),
+    device_attention: DeviceAttentionSignalPayloadSchema.optional(),
+    local_events: LocalEventsSignalPayloadSchema.optional(),
+  }).default({}),
+  profileOverrides: MockContextProfileOverridesSchema.optional(),
+  activeScenario: MockContextScenarioSchema.nullable().optional(),
+  setActive: z.boolean().optional(),
+});
+export type MockContextProfileUpsert = z.infer<typeof MockContextProfileUpsertSchema>;
+
+export const DevSimulatorPreviewRequestSchema = z.object({
+  userId: z.string(),
+  profileId: z.string().optional(),
+  profileOverride: MockContextProfileUpsertSchema.optional(),
+});
+export type DevSimulatorPreviewRequest = z.infer<typeof DevSimulatorPreviewRequestSchema>;
+
+export const DevSimulatorPreviewResultSchema = z.object({
+  contextSnapshotId: z.string(),
+  enabledSources: z.array(z.string()),
+  disabledSources: z.array(z.string()),
+  privacyMetadata: PrivacyMetadataSchema,
+  filteredSignals: z.array(RawContextSignalSchema),
+  assembledUserContext: AssembledUserContextSchema.nullable(),
+  userNegotiationPosition: UserNegotiationPositionSchema.nullable(),
+  agentTrace: AgentTraceSchema,
+  errorMessage: z.string().optional(),
+});
+export type DevSimulatorPreviewResult = z.infer<typeof DevSimulatorPreviewResultSchema>;
+
 export const OrchestrateRequestSchema = z.object({
-  eventType: z.enum(["WalletOpened", "UserDeclaredContextChanged", "UserEnteredDemoZone", "UserEnteredZone"]),
+  eventType: z.enum([
+    "WalletOpened",
+    "UserDeclaredContextChanged",
+    "UserEnteredDemoZone",
+    "UserEnteredZone",
+    "UserContextSignalsChanged",
+    "AppReturnedToForeground",
+    "ManualRefreshRequested",
+  ]),
   userId: z.string(),
   idempotencyKey: z.string().optional(),
   location: z.object({
@@ -743,6 +1272,10 @@ export const OrchestrationResultSchema = z.object({
   matchedTriggers: z.array(TriggerConfigSchema),
   consumerContext: ConsumerContextSnapshotSchema.optional(),
   consumerAgentPosition: ConsumerAgentPositionSchema.optional(),
+  assembledUserContext: AssembledUserContextSchema.nullable().optional(),
+  userNegotiationPosition: UserNegotiationPositionSchema.nullable().optional(),
+  agentTrace: AgentTraceSchema.optional(),
+  noOfferReason: NoOfferReasonSchema.optional(),
   merchantInsights: z.array(MerchantInsightSnapshotSchema).default([]),
   candidateMerchants: z.array(CandidateMerchantSchema).default([]),
   bundleCandidates: z.array(BundleCandidateSchema).default([]),

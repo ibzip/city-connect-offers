@@ -8,6 +8,7 @@ import type {
   MerchantImportRun,
   MerchantInsightSnapshot,
   MerchantRule,
+  MockContextProfile,
   NegotiationBrief,
   NegotiationDecision,
   Offer,
@@ -17,6 +18,7 @@ import type {
   RedemptionResult,
   RedemptionToken,
   TriggerConfig,
+  UserContextAgentRun,
   UserEvent,
   UserProfile,
   ValidationResult,
@@ -33,9 +35,35 @@ import {
 } from "@city-wallet/data-seed";
 import { isPointInsideZone, makeId, nowIso } from "@city-wallet/utils";
 
+/**
+ * Thrown when a concurrent orchestrate() call has already inserted an
+ * OrchestrationRun row with the same idempotencyKey. The caller should
+ * re-read the existing row and dispatch on its status.
+ */
+export class OrchestrationRunConflictError extends Error {
+  readonly idempotencyKey: string;
+  constructor(idempotencyKey: string) {
+    super(`OrchestrationRun already exists for idempotencyKey=${idempotencyKey}`);
+    this.name = "OrchestrationRunConflictError";
+    this.idempotencyKey = idempotencyKey;
+  }
+}
+
+function isPrismaUniqueConstraintError(error: unknown, field?: string): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { code?: unknown; meta?: { target?: unknown } };
+  if (e.code !== "P2002") return false;
+  if (!field) return true;
+  const target = e.meta?.target;
+  if (Array.isArray(target)) return target.includes(field);
+  if (typeof target === "string") return target === field || target.includes(field);
+  return false;
+}
+
 export interface CityWalletRepository {
   resetToSeed(): Promise<void>;
   getUserProfile(userId: string): Promise<UserProfile | null>;
+  saveUserProfile(profile: UserProfile): Promise<UserProfile>;
   getCurrentContext(userId: string): Promise<ConsumerContextSnapshot | null>;
   getLatestContext(): Promise<ConsumerContextSnapshot | null>;
   saveConsumerContext(context: ConsumerContextSnapshot): Promise<ConsumerContextSnapshot>;
@@ -85,6 +113,14 @@ export interface CityWalletRepository {
   updateOrchestrationRun(idempotencyKey: string, patch: Partial<Pick<OrchestrationRun, "status" | "contextSnapshotId" | "resultJson" | "errorJson">>): Promise<OrchestrationRun | null>;
   saveDebugRun(run: OrchestrationResult): Promise<OrchestrationResult>;
   getLastDebugRun(): Promise<OrchestrationResult | null>;
+  listMockContextProfiles(userId: string): Promise<MockContextProfile[]>;
+  getMockContextProfile(profileId: string): Promise<MockContextProfile | null>;
+  getActiveMockContextProfile(userId: string): Promise<MockContextProfile | null>;
+  saveMockContextProfile(profile: MockContextProfile): Promise<MockContextProfile>;
+  setActiveMockContextProfile(userId: string, profileId: string): Promise<MockContextProfile | null>;
+  deleteMockContextProfile(profileId: string): Promise<void>;
+  saveUserContextAgentRun(run: UserContextAgentRun): Promise<UserContextAgentRun>;
+  listUserContextAgentRuns(input: { userId: string; limit?: number }): Promise<UserContextAgentRun[]>;
 }
 
 export type MerchantListFilter = {
@@ -121,6 +157,8 @@ type Tables = {
   importRuns: MerchantImportRun[];
   orchestrationRuns: OrchestrationRun[];
   debugRuns: OrchestrationResult[];
+  mockContextProfiles: MockContextProfile[];
+  userContextAgentRuns: UserContextAgentRun[];
 };
 
 function clone<T>(value: T): T {
@@ -151,6 +189,8 @@ function createSeedTables(): Tables {
     importRuns: [],
     orchestrationRuns: [],
     debugRuns: [],
+    mockContextProfiles: [],
+    userContextAgentRuns: [],
   };
 }
 
@@ -186,6 +226,16 @@ export class SeededRepository implements CityWalletRepository {
 
   async getUserProfile(userId: string) {
     return clone(this.tables.users.find((user) => user.userId === userId) ?? null);
+  }
+
+  async saveUserProfile(profile: UserProfile) {
+    const existingIndex = this.tables.users.findIndex((user) => user.userId === profile.userId);
+    if (existingIndex >= 0) {
+      this.tables.users[existingIndex] = clone(profile);
+    } else {
+      this.tables.users.push(clone(profile));
+    }
+    return clone(profile);
   }
 
   async getCurrentContext(userId: string) {
@@ -439,6 +489,73 @@ export class SeededRepository implements CityWalletRepository {
   async getLastDebugRun() {
     return clone(this.tables.debugRuns.at(-1) ?? null);
   }
+
+  async listMockContextProfiles(userId: string) {
+    return clone(
+      this.tables.mockContextProfiles
+        .filter((profile) => profile.userId === userId)
+        .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)),
+    );
+  }
+
+  async getMockContextProfile(profileId: string) {
+    return clone(this.tables.mockContextProfiles.find((profile) => profile.id === profileId) ?? null);
+  }
+
+  async getActiveMockContextProfile(userId: string) {
+    const active = this.tables.mockContextProfiles.find(
+      (profile) => profile.userId === userId && profile.isActive,
+    );
+    return clone(active ?? null);
+  }
+
+  async saveMockContextProfile(profile: MockContextProfile) {
+    const existing = this.tables.mockContextProfiles.find((row) => row.id === profile.id);
+    const next: MockContextProfile = {
+      ...profile,
+      // Trust the version the handler already computed; only fall back to
+      // existing+1 when no version was supplied.
+      version: profile.version > 0 ? profile.version : (existing?.version ?? 0) + 1,
+      updatedAt: nowIso(),
+    };
+    this.tables.mockContextProfiles = this.tables.mockContextProfiles.filter((row) => row.id !== profile.id);
+    this.tables.mockContextProfiles.push(clone(next));
+    return clone(next);
+  }
+
+  async setActiveMockContextProfile(userId: string, profileId: string) {
+    const target = this.tables.mockContextProfiles.find(
+      (profile) => profile.id === profileId && profile.userId === userId,
+    );
+    if (!target) return null;
+    this.tables.mockContextProfiles = this.tables.mockContextProfiles.map((profile) => {
+      if (profile.userId !== userId) return profile;
+      const isActive = profile.id === profileId;
+      if (profile.isActive === isActive) return profile;
+      return { ...profile, isActive, version: profile.version + 1, updatedAt: nowIso() };
+    });
+    return clone(this.tables.mockContextProfiles.find((profile) => profile.id === profileId) ?? null);
+  }
+
+  async deleteMockContextProfile(profileId: string) {
+    this.tables.mockContextProfiles = this.tables.mockContextProfiles.filter(
+      (profile) => profile.id !== profileId,
+    );
+  }
+
+  async saveUserContextAgentRun(run: UserContextAgentRun) {
+    this.tables.userContextAgentRuns = this.tables.userContextAgentRuns.filter((existing) => existing.id !== run.id);
+    this.tables.userContextAgentRuns.push(clone(run));
+    return clone(run);
+  }
+
+  async listUserContextAgentRuns(input: { userId: string; limit?: number }) {
+    const runs = this.tables.userContextAgentRuns
+      .filter((run) => run.userId === input.userId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const limit = input.limit && input.limit > 0 ? input.limit : runs.length;
+    return clone(runs.slice(0, limit));
+  }
 }
 
 export class PrismaRepository implements CityWalletRepository {
@@ -447,6 +564,8 @@ export class PrismaRepository implements CityWalletRepository {
   async resetToSeed() {
     const db = this.prisma as any;
     await db.$transaction([
+      db.userContextAgentRun.deleteMany(),
+      db.mockContextProfile.deleteMany(),
       db.orchestrationRun.deleteMany(),
       db.merchantImportRun.deleteMany(),
       db.poiDiscoveryCache.deleteMany(),
@@ -567,6 +686,22 @@ export class PrismaRepository implements CityWalletRepository {
   async getUserProfile(userId: string) {
     const row = await (this.prisma as any).userProfile.findUnique({ where: { userId } });
     return row ? fromJson<UserProfile>(row.data) : null;
+  }
+
+  async saveUserProfile(profile: UserProfile) {
+    const db = this.prisma as any;
+    // The UserProfile FK requires a User row; ensure one exists for fresh users.
+    await db.user.upsert({
+      where: { id: profile.userId },
+      create: { id: profile.userId },
+      update: {},
+    });
+    await db.userProfile.upsert({
+      where: { userId: profile.userId },
+      create: { userId: profile.userId, data: toJson(profile) },
+      update: { data: toJson(profile) },
+    });
+    return profile;
   }
 
   async getCurrentContext(userId: string) {
@@ -987,18 +1122,30 @@ export class PrismaRepository implements CityWalletRepository {
   }
 
   async createOrchestrationRun(run: Omit<OrchestrationRun, "createdAt" | "updatedAt">) {
-    const row = await (this.prisma as any).orchestrationRun.create({
-      data: {
-        idempotencyKey: run.idempotencyKey,
-        userId: run.userId,
-        eventType: run.eventType,
-        contextSnapshotId: run.contextSnapshotId,
-        status: run.status,
-        resultJson: run.resultJson ? toJson(run.resultJson) : null,
-        errorJson: run.errorJson ? toJson(run.errorJson) : null,
-      },
-    });
-    return orchestrationRunFromRow(row);
+    try {
+      const row = await (this.prisma as any).orchestrationRun.create({
+        data: {
+          idempotencyKey: run.idempotencyKey,
+          userId: run.userId,
+          eventType: run.eventType,
+          contextSnapshotId: run.contextSnapshotId,
+          status: run.status,
+          resultJson: run.resultJson ? toJson(run.resultJson) : null,
+          errorJson: run.errorJson ? toJson(run.errorJson) : null,
+        },
+      });
+      return orchestrationRunFromRow(row);
+    } catch (error) {
+      // Prisma raises P2002 when a unique constraint is violated. For
+      // OrchestrationRun this means another concurrent orchestrate() call
+      // already inserted a row with the same idempotencyKey. Surface this as a
+      // typed error so the orchestration layer can decide whether to return
+      // the existing run instead of crashing.
+      if (isPrismaUniqueConstraintError(error, "idempotencyKey")) {
+        throw new OrchestrationRunConflictError(run.idempotencyKey);
+      }
+      throw error;
+    }
   }
 
   async updateOrchestrationRun(
@@ -1034,6 +1181,140 @@ export class PrismaRepository implements CityWalletRepository {
     });
     return row ? fromJson<OrchestrationResult>(row.data) : null;
   }
+
+  async listMockContextProfiles(userId: string) {
+    const rows = await (this.prisma as any).mockContextProfile.findMany({
+      where: { userId },
+      orderBy: { updatedAt: "desc" },
+    });
+    return rows.map((row: any) => mockContextProfileFromRow(row));
+  }
+
+  async getMockContextProfile(profileId: string) {
+    const row = await (this.prisma as any).mockContextProfile.findUnique({
+      where: { id: profileId },
+    });
+    return row ? mockContextProfileFromRow(row) : null;
+  }
+
+  async getActiveMockContextProfile(userId: string) {
+    const row = await (this.prisma as any).mockContextProfile.findFirst({
+      where: { userId, isActive: true },
+      orderBy: { updatedAt: "desc" },
+    });
+    return row ? mockContextProfileFromRow(row) : null;
+  }
+
+  async saveMockContextProfile(profile: MockContextProfile) {
+    const db = this.prisma as any;
+    const existing = await db.mockContextProfile.findUnique({ where: { id: profile.id } });
+    // The handler already incremented `profile.version` from the prior version;
+    // trust it instead of double-incrementing here.
+    const nextVersion = profile.version > 0 ? profile.version : (existing?.version ?? 0) + 1;
+    const data = {
+      userId: profile.userId,
+      name: profile.name,
+      enabledSourcesJson: toJson(profile.enabledSources ?? {}),
+      signalPayloadsJson: toJson(profile.signalPayloads ?? {}),
+      profileOverridesJson: profile.profileOverrides ? toJson(profile.profileOverrides) : null,
+      activeScenario: profile.activeScenario ?? null,
+      isActive: profile.isActive ?? false,
+      version: nextVersion,
+    };
+    const row = await db.mockContextProfile.upsert({
+      where: { id: profile.id },
+      create: { id: profile.id, ...data },
+      update: data,
+    });
+    return mockContextProfileFromRow(row);
+  }
+
+  async setActiveMockContextProfile(userId: string, profileId: string) {
+    const db = this.prisma as any;
+    const target = await db.mockContextProfile.findUnique({ where: { id: profileId } });
+    if (!target || target.userId !== userId) return null;
+    await db.$transaction([
+      db.mockContextProfile.updateMany({
+        where: { userId, NOT: { id: profileId } },
+        data: { isActive: false },
+      }),
+      db.mockContextProfile.update({
+        where: { id: profileId },
+        data: { isActive: true, version: { increment: 1 } },
+      }),
+    ]);
+    const row = await db.mockContextProfile.findUnique({ where: { id: profileId } });
+    return row ? mockContextProfileFromRow(row) : null;
+  }
+
+  async deleteMockContextProfile(profileId: string) {
+    await (this.prisma as any).mockContextProfile.delete({ where: { id: profileId } }).catch(() => null);
+  }
+
+  async saveUserContextAgentRun(run: UserContextAgentRun) {
+    const db = this.prisma as any;
+    const data = {
+      userId: run.userId,
+      contextSnapshotId: run.contextSnapshotId,
+      stage: run.stage,
+      provider: run.provider,
+      model: run.model ?? null,
+      latencyMs: run.latencyMs ?? null,
+      validationStatus: run.validationStatus,
+      errorType: run.errorType ?? null,
+      outputJson: run.outputJson,
+      createdAt: new Date(run.createdAt),
+    };
+    const row = await db.userContextAgentRun.upsert({
+      where: { id: run.id },
+      create: { id: run.id, ...data },
+      update: data,
+    });
+    return userContextAgentRunFromRow(row);
+  }
+
+  async listUserContextAgentRuns(input: { userId: string; limit?: number }) {
+    const rows = await (this.prisma as any).userContextAgentRun.findMany({
+      where: { userId: input.userId },
+      orderBy: { createdAt: "desc" },
+      take: input.limit && input.limit > 0 ? input.limit : 100,
+    });
+    return rows.map((row: any) => userContextAgentRunFromRow(row));
+  }
+}
+
+function mockContextProfileFromRow(row: any): MockContextProfile {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name,
+    enabledSources: row.enabledSourcesJson ? fromJson<Record<string, boolean>>(row.enabledSourcesJson) : {},
+    signalPayloads: row.signalPayloadsJson ? fromJson<MockContextProfile["signalPayloads"]>(row.signalPayloadsJson) : {},
+    profileOverrides: row.profileOverridesJson
+      ? fromJson<MockContextProfile["profileOverrides"]>(row.profileOverridesJson)
+      : undefined,
+    activeScenario: (row.activeScenario ?? null) as MockContextProfile["activeScenario"],
+    isActive: !!row.isActive,
+    version: row.version ?? 0,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+    updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+  };
+}
+
+function userContextAgentRunFromRow(row: any): UserContextAgentRun {
+  return {
+    id: row.id,
+    userId: row.userId,
+    contextSnapshotId: row.contextSnapshotId,
+    stage: row.stage,
+    provider: row.provider,
+    model: row.model ?? null,
+    latencyMs: row.latencyMs ?? null,
+    validationStatus: row.validationStatus,
+    errorType: row.errorType ?? null,
+    outputJson: row.outputJson ?? null,
+    createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+  };
 }
 
 function merchantToDbData(merchant: Merchant) {

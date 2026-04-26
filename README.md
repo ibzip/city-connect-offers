@@ -11,11 +11,13 @@ There is no operator console and no separate demo app. The original AI-generated
 
 The monorepo uses pnpm workspaces and Turborepo.
 
-- `apps/consumer-wallet`: static-exportable Next.js consumer app for wallet, offer claim, redemption, and debug.
+- `apps/consumer-wallet`: static-exportable Next.js consumer app for wallet, offer claim, redemption, debug, and the gated `/dev/context-simulator` developer surface.
 - `apps/merchant-portal`: static-exportable Next.js merchant app for rules, dashboard, and debug.
 - `apps/api-gateway`: AWS Lambda-style API Gateway/orchestration handler with a local dev adapter.
 - `apps/context-service`, `apps/merchant-intelligence-service`, `apps/negotiation-service`, `apps/validation-service`, `apps/offer-service`, `apps/redemption-service`, `apps/analytics-service`: thin deployable Lambda wrappers around domain packages.
-- `packages/contracts`: Zod schemas and shared TypeScript contracts.
+- `packages/contracts`: Zod schemas and shared TypeScript contracts (including `AssembledUserContext`, `UserNegotiationPosition`, `MockContextProfile`, and per-source `NormalizedSignal` payload schemas).
+- `packages/raw-context-domain`: 10 mock raw signal providers (calendar/fitness/mobility/mood/payment/social/transit/dietary/device/local-events), real signal wrappers (location/weather/time/active zone/merchant density), `collectRawSignals`, and the `filterForLLM` privacy filter.
+- `packages/user-agent-domain`: `JsonAgentClient` interface, `AzureOpenAIJsonAgentClient` with one-shot schema repair, `User Context Assembler Agent`, `User Negotiator Agent`, and the `createDefaultJsonAgentClient` factory.
 - `packages/config`: providers, triggers, bundle policy, discovery/import policy, offer/copy policy, platform goal model.
 - `packages/data-seed`: seeded Mia/Stuttgart/merchant scenario data only.
 - `packages/db`: repository interfaces, seeded DB-like repository, Prisma repository wrapper.
@@ -34,6 +36,15 @@ pnpm db:generate
 pnpm db:migrate
 pnpm db:seed
 pnpm dev
+```
+
+`pnpm db:seed` is idempotent: it upserts canonical seed rows by primary key and
+preserves any merchants you have imported via the Merchant Portal. Run it as
+often as you like. To wipe the local DB to a clean canonical state (this
+deletes imported merchants, analytics events, orchestration runs, etc.) use:
+
+```bash
+pnpm db:reset
 ```
 
 Local ports:
@@ -107,6 +118,81 @@ Safety defaults:
 - per-category caps keep cafes/restaurants from dominating the import.
 
 Normal Consumer Wallet orchestration queries stored DB merchants near the user and expands search radius `250m -> 500m -> 1000m -> 2000m` when too few candidates exist. It does not call Google Places, Overpass, Tavily, or Nominatim on wallet open unless `ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK=true`.
+
+## User Context Intelligence Pipeline
+
+City Wallet now runs a two-agent LLM pipeline on top of the existing backend offer negotiator. The Consumer Wallet itself stays minimal and wallet-like; all reasoning happens server-side.
+
+```
+raw mock + real signal providers
+        |
+        v
+collectRawSignals(MockContextProfile + real env)
+        |
+        v
+filterForLLM (privacy filter: drops calendar titles, raw GPS, raw biometrics)
+        |
+        v
+User Context Assembler Agent (Azure OpenAI, JSON schema-validated)
+        |
+        v
+User Negotiator Agent (Azure OpenAI, JSON schema-validated)
+        |
+        v
+Backend Offer Negotiator (Azure OpenAI when configured) -> Validation -> Offer
+```
+
+### LLM modes
+
+The pipeline behaviour is controlled by `LLM_PROVIDER`:
+
+- `LLM_PROVIDER=azure_openai`: all three agents (assembler, user negotiator, backend negotiator) run as real LLM calls. If Azure secrets are missing or any required call fails, orchestration halts with `noOfferReason="agent_failed"` (or `"agent_skipped"` for invalid LLM output). The pipeline never fabricates `AssembledUserContext` or `UserNegotiationPosition`.
+- `LLM_PROVIDER=mock_llm` (default): the user-context assembler and user negotiator are skipped (`assembledUserContext` and `userNegotiationPosition` remain `null`, agent trace records `validationStatus: "skipped"`, `errorType: "azure_required"`). The legacy seeded happy path continues with `MockLLMClient` for the backend negotiator. The Consumer Wallet shows an Azure-required banner only when `?debug=true` is set.
+
+To exercise the new intelligence layer end-to-end, set:
+
+```bash
+LLM_PROVIDER=azure_openai
+AZURE_OPENAI_ENDPOINT=...
+AZURE_OPENAI_DEPLOYMENT=...
+AZURE_OPENAI_API_KEY=...
+AZURE_OPENAI_API_VERSION=...
+```
+
+### Triggers
+
+User-side events automatically activate the pipeline:
+
+- `WalletOpened`, `UserEnteredZone`, `UserDeclaredContextChanged` (existing).
+- `AppReturnedToForeground` (browser `visibilitychange`).
+- `BrowserLocationResolved` (re-evaluates after geolocation grant or > `LOCATION_CHANGE_THRESHOLD_METERS` movement).
+- `ManualRefreshRequested` (debounced refresh action in the wallet).
+- `UserContextSignalsChanged` (raw context pipeline updates beyond TTL).
+
+### Dev context simulator
+
+The Consumer Wallet exposes a developer-only `/dev/context-simulator` page for editing mock raw context signals, applying scenario presets, previewing assembler + user-negotiator output, and triggering the full pipeline. It is gated by a single server-side flag on the api-gateway:
+
+```bash
+ENABLE_DEV_CONTEXT_SIMULATOR=true
+```
+
+The `/dev/context-simulator` page always builds and probes `/api/dev/context-simulator/profiles` at runtime: when the flag is unset (or the api-gateway returns `404`) the page renders a friendly "disabled" panel; no consumer-wallet rebuild is required. The `/api/dev/context-simulator/preview` endpoint is strictly side-effect-free: it never creates offers, tokens, orchestration runs, or analytics offer events.
+
+### Persistence
+
+- `MockContextProfile` is persisted in Prisma with one active profile per user (enforced by transaction in the repository).
+- `UserContextAgentRun` records every LLM agent invocation with `provider`, `model`, `latencyMs`, `validationStatus` (`ok`/`repaired`/`skipped`/`failed`), `errorType`, and validated `outputJson` (or `null` for `skipped`/`failed`).
+- The orchestration idempotency key includes the active mock profile id and version so editing the simulator profile invalidates duplicates immediately.
+
+### Testing scenarios
+
+Recommended local scenarios (set `LLM_PROVIDER` accordingly):
+
+1. `mock_llm` happy path: `pnpm dev`, open `http://localhost:3000/wallet`, expect the seeded bundle with `assembledUserContext: null` and the agent trace marked `skipped`.
+2. `azure_openai` end-to-end: set `LLM_PROVIDER=azure_openai` and Azure secrets, open `http://localhost:3000/wallet?debug=true`, inspect `Assembled user context`, `User negotiation position`, and `Agent trace` panels.
+3. `azure_openai` failure-safe: set `LLM_PROVIDER=azure_openai` without Azure secrets, expect `noOfferReason="agent_failed"` and no offer.
+4. Dev simulator: set `ENABLE_DEV_CONTEXT_SIMULATOR=true` on the api-gateway, restart it, open `http://localhost:3000/dev/context-simulator/`, edit profile signals, run preview, then run the full pipeline.
 
 ## Service Modes
 
@@ -218,6 +304,12 @@ Optional real integrations:
 - `ENABLE_OVERPASS_IMPORT_FALLBACK`
 - `ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK`
 - `ENABLE_DEV_RESET`
+- `ENABLE_DEV_CONTEXT_SIMULATOR`
+- `CONTEXT_SNAPSHOT_TTL_MINUTES`
+- `LOCATION_CHANGE_THRESHOLD_METERS`
+- `USER_CONTEXT_AGENT_TIMEOUT_MS`
+- `USER_NEGOTIATOR_AGENT_TIMEOUT_MS`
+- `DEBUG_STORE_RAW_CONTEXT`
 
 ## What Is Simulated
 
@@ -226,7 +318,9 @@ Optional real integrations:
 - Payment density uses `SimulatedPayoneProvider`.
 - User context uses declared context.
 - Local events use mock events.
-- Negotiation uses deterministic `MockLLMClient` by default; Azure OpenAI can be enabled with env vars and falls back to mock.
+- Negotiation uses deterministic `MockLLMClient` by default. When `LLM_PROVIDER=azure_openai`, the backend negotiator runs strictly (no mock fallback) alongside the user-context assembler and user-negotiator agents; failures halt with `noOfferReason="agent_failed"`.
+- The user-context assembler and user-negotiator agents are never mocked. In `mock_llm` mode they are skipped and report `validationStatus: "skipped"`.
+- Raw context signals are produced by the `raw-context-domain` mock providers (calendar, fitness, mobility, mood, payment preference, social, transit, dietary preference, device attention, local events) and existing real signals (location, weather, time, active zone, merchant density). Sensitive fields (calendar titles/attendees, exact GPS, raw biometrics) are dropped by `filterForLLM` before any LLM call.
 - Seeded merchant data remains fake/seeded. City import uses Google Places as the primary coordinate-bearing source when `GOOGLE_PLACES_API_KEY` is set; Overpass remains the fallback. Every imported merchant is treated as a real `partner` in the recommendation pipeline, but its products, rules, transactions, payment density, and redemption signals are synthesised on import (flagged via `Merchant.syntheticFields`). Real partner integrations are not yet wired.
 - Redemption is simulated checkout with deterministic seeded token codes.
 

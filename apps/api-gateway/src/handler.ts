@@ -14,31 +14,51 @@ import {
   ActivateCommerceZoneRequestSchema,
   ClaimOfferRequestSchema,
   defaultProviderBudget,
+  DevSimulatorPreviewRequestSchema,
   MerchantImportContinueRequestSchema,
   MerchantDashboardQuerySchema,
   MerchantRuleCompilePreviewRequestSchema,
   MerchantUpdateSchema,
   MerchantRuleUpdateSchema,
+  MockContextProfileUpsertSchema,
   OrchestrateRequestSchema,
   RedeemTokenRequestSchema,
   UserEventSchema,
+  UserProfileUpdateSchema,
+  type AgentTrace,
   type AnalyticsEvent,
+  type AssembledUserContext,
+  type ConnectedSourceChip,
   type ConsumerContextSnapshot,
+  type DevSimulatorPreviewResult,
   type Merchant,
   type MerchantInsightSnapshot,
+  type MockContextProfile,
+  type MockContextProfileOverrides,
   type NearbyMerchantSearchMetadata,
+  type NoOfferReason,
   type OrchestrateRequest,
   type OrchestrationResult,
   type TriggerConfig,
   type UserEvent,
+  type UserNegotiationPosition,
+  type UserProfile,
 } from "@city-wallet/contracts";
 import { buildConsumerAgentPosition } from "@city-wallet/consumer-agent-domain";
-import { getRepository } from "@city-wallet/db";
+import { OrchestrationRunConflictError, getRepository } from "@city-wallet/db";
 import {
   compileAndApplyMerchantRules,
   compileMerchantFreeformRules,
   FreeformRuleCompilationError,
 } from "@city-wallet/merchant-intelligence-domain";
+import { BackendNegotiatorError } from "@city-wallet/negotiation-domain";
+import {
+  collectRawSignals,
+  computeSignalsHash,
+  defaultProviders,
+  filterForLLM,
+  scenarioPresets,
+} from "@city-wallet/raw-context-domain";
 import {
   AnalyticsServiceClient,
   ContextServiceClient,
@@ -48,9 +68,37 @@ import {
   RedemptionServiceClient,
   ValidationServiceClient,
 } from "@city-wallet/service-clients";
+import {
+  assembleUserContext,
+  createDefaultJsonAgentClient,
+  getMissingAzureLlmVars,
+  isAzureLlmConfigured,
+  isContextAgentMode,
+  LLMAgentError,
+  runUserNegotiator,
+} from "@city-wallet/user-agent-domain";
 import { calculateDistanceMeters, makeId, nowIso, roundCoordinate, timeBucketKey } from "@city-wallet/utils";
 
+let azureMisconfigWarned = false;
+
+function warnIfAzureMisconfigured() {
+  if (azureMisconfigWarned) return;
+  if (process.env.LLM_PROVIDER !== "azure_openai") return;
+  if (isAzureLlmConfigured()) return;
+  azureMisconfigWarned = true;
+  const missing = getMissingAzureLlmVars();
+  console.warn(
+    `[city-wallet] LLM_PROVIDER=azure_openai but the following env vars are missing/empty: ${missing.join(", ")}. ` +
+      "Strict mode is on: every orchestration will halt with noOfferReason=agent_failed (errorType=missing_config). " +
+      "Set the missing vars or switch LLM_PROVIDER=mock_llm. (AZURE_OPENAI_API_VERSION is optional and defaults to 2024-10-21.)",
+  );
+}
+
+warnIfAzureMisconfigured();
+
 export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  warnIfAzureMisconfigured();
+
   if (event.requestContext.http.method === "OPTIONS") {
     return json(204, null);
   }
@@ -243,15 +291,73 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/api/consumer/state") {
       const repository = getRepository();
       const userId = event.queryStringParameters?.userId ?? "user_mia";
-      const [profile, context, offers, tokens, events, lastRun] = await Promise.all([
+      const [profile, context, offers, tokens, events, lastRun, activeMock] = await Promise.all([
         repository.getUserProfile(userId),
         repository.getCurrentContext(userId),
         repository.listOffers(userId),
         repository.listRedemptionTokens(),
         repository.listAnalyticsEvents(80),
         repository.getLastDebugRun(),
+        repository.getActiveMockContextProfile(userId),
       ]);
-      return json(200, { profile, context, offers, tokens, events, lastRun });
+      // Surface the active mock profile + its overrides so debug-mode wallet
+      // UIs can show "tourist scenario active → walk 2000m" instead of users
+      // wondering why their constraints look different.
+      const activeMockProfile = activeMock
+        ? {
+            id: activeMock.id,
+            name: activeMock.name,
+            activeScenario: activeMock.activeScenario ?? null,
+            version: activeMock.version,
+            profileOverrides: activeMock.profileOverrides ?? null,
+          }
+        : null;
+      return json(200, { profile, context, offers, tokens, events, lastRun, activeMockProfile });
+    }
+
+    if (method === "PATCH" && path === "/api/consumer/profile") {
+      const repository = getRepository();
+      const userId = event.queryStringParameters?.userId ?? "user_mia";
+      const update = UserProfileUpdateSchema.parse(readJson(event));
+      const existing = await repository.getUserProfile(userId);
+      const merged: UserProfile = {
+        userId,
+        displayName: existing?.displayName ?? "User",
+        privacyMode: update.privacyMode ?? existing?.privacyMode ?? "high",
+        rewardPreference: update.rewardPreference ?? existing?.rewardPreference ?? "cashback",
+        walkingToleranceMeters: update.walkingToleranceMeters ?? existing?.walkingToleranceMeters ?? 600,
+        maxBundleStops: update.maxBundleStops ?? existing?.maxBundleStops ?? 2,
+        maxOffersPerHour: update.maxOffersPerHour ?? existing?.maxOffersPerHour ?? 1,
+      };
+      const saved = await repository.saveUserProfile(merged);
+      return json(200, saved);
+    }
+
+    if (method === "GET" && path === "/api/consumer/connected-sources") {
+      const userId = event.queryStringParameters?.userId ?? "user_mia";
+      return json(200, await buildConnectedSourceChips(userId));
+    }
+
+    if (method === "GET" && path === "/api/consumer/context-summary") {
+      const userId = event.queryStringParameters?.userId ?? "user_mia";
+      return json(200, await buildContextSummary(userId));
+    }
+
+    if (method === "GET" && path === "/api/consumer/context-profile-version") {
+      const userId = event.queryStringParameters?.userId ?? "user_mia";
+      const profile = await getRepository().getActiveMockContextProfile(userId);
+      return json(200, {
+        profileId: profile?.id ?? null,
+        version: profile?.version ?? 0,
+        updatedAt: profile?.updatedAt ?? null,
+      });
+    }
+
+    if (path.startsWith("/api/dev/context-simulator")) {
+      if (process.env.ENABLE_DEV_CONTEXT_SIMULATOR !== "true") {
+        return json(404, { error: "Dev context simulator is disabled." });
+      }
+      return await handleDevSimulator(method, path, event);
     }
 
     if (method === "GET" && path === "/api/merchant/dashboard") {
@@ -302,69 +408,34 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
   const repository = getRepository();
   const clients = makeClients();
   const analyticsEvents: AnalyticsEvent[] = [];
-  const idempotencyKey = input.idempotencyKey ?? createIdempotencyKey(input);
-  const existingRun = await repository.getOrchestrationRun(idempotencyKey);
-  if (existingRun?.status === "completed" && existingRun.resultJson) {
-    return existingRun.resultJson as OrchestrationResult;
-  }
-  if (existingRun?.status === "running") {
-    const stale = Date.now() - new Date(existingRun.updatedAt).getTime() > 2 * 60 * 1000;
-    if (!stale) {
-      return {
-        triggered: false,
-        reason: "orchestration_already_running",
-        idempotencyKey,
-        orchestrationStatus: "running",
-        retryAfterMs: 2_000,
-        matchedTriggers: [],
-        merchantInsights: [],
-        candidateMerchants: [],
-        bundleCandidates: [],
-        analyticsEvents: [],
-        discoveredMerchants: [],
-      };
-    }
-    await repository.updateOrchestrationRun(idempotencyKey, {
-      status: "failed",
-      errorJson: { reason: "stale_orchestration_run", message: "A retry must use a new idempotency key from a new context/time bucket." },
-    });
-    return {
-      triggered: false,
-      reason: "stale_orchestration_run",
-      idempotencyKey,
-      orchestrationStatus: "failed",
-      retryAfterMs: 1_000,
-      matchedTriggers: [],
-      merchantInsights: [],
-      candidateMerchants: [],
-      bundleCandidates: [],
-      analyticsEvents: [],
-      discoveredMerchants: [],
-    };
-  }
-  if (existingRun?.status === "failed") {
-    return {
-      triggered: false,
-      reason: "orchestration_failed",
-      idempotencyKey,
-      orchestrationStatus: "failed",
-      matchedTriggers: [],
-      merchantInsights: [],
-      candidateMerchants: [],
-      bundleCandidates: [],
-      analyticsEvents: [],
-      discoveredMerchants: [],
-    };
-  }
+  const activeMockProfile = await repository.getActiveMockContextProfile(input.userId);
+  const idempotencyKey = input.idempotencyKey ?? createIdempotencyKey(input, activeMockProfile);
 
-  await repository.createOrchestrationRun({
-    idempotencyKey,
-    userId: input.userId,
-    eventType: input.eventType,
-    status: "running",
-    resultJson: null,
-    errorJson: null,
-  });
+  const earlyReturn = await resolveExistingOrchestrationRun(repository, idempotencyKey);
+  if (earlyReturn) return earlyReturn;
+
+  try {
+    await repository.createOrchestrationRun({
+      idempotencyKey,
+      userId: input.userId,
+      eventType: input.eventType,
+      status: "running",
+      resultJson: null,
+      errorJson: null,
+    });
+  } catch (error) {
+    if (error instanceof OrchestrationRunConflictError) {
+      // A concurrent orchestrate() call inserted the row first. Re-read and
+      // dispatch the same way as if we'd seen it in the initial check.
+      const concurrent = await resolveExistingOrchestrationRun(repository, idempotencyKey);
+      if (concurrent) return concurrent;
+      // The row was deleted between the conflict and our re-read. Surface as
+      // "already running" so the client retries with backoff instead of
+      // blowing up.
+      return makeAlreadyRunningResult(idempotencyKey);
+    }
+    throw error;
+  }
 
   try {
     const providerBudget = defaultProviderBudget();
@@ -516,15 +587,86 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       }))));
     }
 
-    const profile = await repository.getUserProfile(input.userId);
-    if (!profile) throw new Error(`Unknown user ${input.userId}`);
+    const persistedProfile = await repository.getUserProfile(input.userId);
+    if (!persistedProfile) throw new Error(`Unknown user ${input.userId}`);
     if (discoveredMerchants.length > 0) {
       storedSupply = await loadStoredMerchantsForWallet(repository, consumerContext);
     }
 
+    // Active mock profile overrides take precedence for this run only. The
+    // user's persisted UserProfile is never mutated here.
+    const overrides = activeMockProfile?.profileOverrides;
+    const profile = applyOverridesToUserProfile(persistedProfile, overrides);
+    const overriddenContext = applyOverridesToContext(consumerContext, overrides);
+
     const negotiationContext: ConsumerContextSnapshot = storedSupply.metadata.radiusUsedMeters
-      ? { ...consumerContext, walkingToleranceMeters: Math.max(consumerContext.walkingToleranceMeters, storedSupply.metadata.radiusUsedMeters) }
-      : consumerContext;
+      ? { ...overriddenContext, walkingToleranceMeters: Math.max(overriddenContext.walkingToleranceMeters, storedSupply.metadata.radiusUsedMeters) }
+      : overriddenContext;
+
+    if (overrides) {
+      analyticsEvents.push(await clients.analytics.record({
+        type: "context_refreshed",
+        layer: "config",
+        message: `Active mock profile "${activeMockProfile!.name}" applied profile overrides.`,
+        payload: {
+          profileId: activeMockProfile!.id,
+          profileVersion: activeMockProfile!.version,
+          activeScenario: activeMockProfile!.activeScenario ?? null,
+          overrides,
+          effective: {
+            walkingToleranceMeters: profile.walkingToleranceMeters,
+            maxBundleStops: profile.maxBundleStops,
+            maxOffersPerHour: profile.maxOffersPerHour,
+            rewardPreference: profile.rewardPreference,
+            privacyMode: profile.privacyMode,
+            declaredIntent: negotiationContext.declaredIntent,
+            availableMinutes: negotiationContext.availableMinutes,
+          },
+        },
+      }));
+    }
+
+    const userContextPipeline = await runUserContextPipeline({
+      userId: input.userId,
+      mockProfile: activeMockProfile,
+      consumerContext: negotiationContext,
+      userProfile: profile,
+      nearbyMerchantCount: storedSupply.merchants.length,
+      analyticsClient: clients.analytics,
+      repository,
+    });
+    analyticsEvents.push(...userContextPipeline.analyticsEvents);
+    if (userContextPipeline.haltWithNoOffer) {
+      analyticsEvents.push(await clients.analytics.record({
+        type: "no_offer_emitted",
+        layer: "user_agent",
+        message: `Halting orchestration with no_offer (${userContextPipeline.noOfferReason}).`,
+        payload: { reason: userContextPipeline.noOfferReason, agentTrace: userContextPipeline.agentTrace },
+      }));
+      return completeRun({
+        repository,
+        idempotencyKey,
+        result: {
+          triggered: true,
+          reason: "no_trigger_matched",
+          idempotencyKey,
+          orchestrationStatus: "completed",
+          matchedTriggers,
+          consumerContext: negotiationContext,
+          merchantInsights: [],
+          candidateMerchants: [],
+          bundleCandidates: [],
+          analyticsEvents,
+          providerBudget,
+          discoveredMerchants,
+          assembledUserContext: null,
+          userNegotiationPosition: null,
+          agentTrace: userContextPipeline.agentTrace,
+          noOfferReason: userContextPipeline.noOfferReason,
+        },
+      });
+    }
+
     const consumerAgentPosition = buildConsumerAgentPosition(profile, negotiationContext);
     const merchants = storedSupply.merchants;
     const merchantInsights = await clients.merchantIntelligence.refreshInsights(merchants.map((merchant) => merchant.id));
@@ -547,15 +689,105 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       payload: { userEvent, consumerAgentPosition, idempotencyKey },
     }));
 
-    const negotiation = await clients.negotiation.negotiate({
-      userEvent,
-      consumerContext: negotiationContext,
-      consumerAgentPosition,
-      merchants,
-      merchantInsights,
-    });
+    let negotiation: Awaited<ReturnType<typeof clients.negotiation.negotiate>>;
+    try {
+      negotiation = await clients.negotiation.negotiate({
+        userEvent,
+        consumerContext: negotiationContext,
+        consumerAgentPosition,
+        merchants,
+        merchantInsights,
+        assembledUserContext: userContextPipeline.assembledUserContext,
+        userNegotiationPosition: userContextPipeline.userNegotiationPosition,
+      });
+    } catch (error) {
+      if (error instanceof BackendNegotiatorError) {
+        console.warn(`[api-gateway] backend negotiator failed (${error.type}): ${error.message}`);
+        analyticsEvents.push(await clients.analytics.record({
+          type: "backend_negotiator_failed",
+          layer: "negotiation",
+          message: `Backend negotiator failed: ${error.type}.`,
+          payload: { errorType: error.type, message: error.message },
+        }));
+        analyticsEvents.push(await clients.analytics.record({
+          type: "no_offer_emitted",
+          layer: "negotiation",
+          message: "Halting orchestration with no_offer (agent_failed) due to backend negotiator failure.",
+          payload: { reason: "agent_failed", source: "backend_negotiator", errorType: error.type },
+        }));
+        return completeRun({
+          repository,
+          idempotencyKey,
+          result: {
+            triggered: true,
+            reason: "no_trigger_matched",
+            idempotencyKey,
+            orchestrationStatus: "completed",
+            matchedTriggers,
+            consumerContext: negotiationContext,
+            consumerAgentPosition,
+            merchantInsights,
+            candidateMerchants: [],
+            bundleCandidates: [],
+            analyticsEvents,
+            providerBudget,
+            discoveredMerchants,
+            assembledUserContext: userContextPipeline.assembledUserContext,
+            userNegotiationPosition: userContextPipeline.userNegotiationPosition,
+            agentTrace: userContextPipeline.agentTrace,
+            noOfferReason: "agent_failed",
+          },
+        });
+      }
+      throw error;
+    }
     await repository.saveNegotiationBrief(negotiation.negotiationBrief);
     const decisionId = makeId("decision");
+    // Re-validate the parsed decision shape before persisting so a malformed
+    // payload (e.g. from a misbehaving non-Azure HTTP backend) surfaces a clean
+    // no_offer instead of a Prisma "Argument decisionType is missing" crash.
+    const decisionShapeOk =
+      negotiation.negotiationDecision &&
+      typeof (negotiation.negotiationDecision as { decision?: unknown }).decision === "string" &&
+      Array.isArray((negotiation.negotiationDecision as { selectedMerchants?: unknown }).selectedMerchants);
+    if (!decisionShapeOk) {
+      console.warn("[api-gateway] backend negotiator returned a malformed NegotiationDecision; halting with no_offer.");
+      analyticsEvents.push(await clients.analytics.record({
+        type: "backend_negotiator_failed",
+        layer: "negotiation",
+        message: "Backend negotiator returned a malformed NegotiationDecision.",
+        payload: { errorType: "schema_validation_failed" },
+      }));
+      analyticsEvents.push(await clients.analytics.record({
+        type: "no_offer_emitted",
+        layer: "negotiation",
+        message: "Halting orchestration with no_offer (agent_failed) due to malformed negotiator output.",
+        payload: { reason: "agent_failed", source: "backend_negotiator", errorType: "schema_validation_failed" },
+      }));
+      return completeRun({
+        repository,
+        idempotencyKey,
+        result: {
+          triggered: true,
+          reason: "no_trigger_matched",
+          idempotencyKey,
+          orchestrationStatus: "completed",
+          matchedTriggers,
+          consumerContext: negotiationContext,
+          consumerAgentPosition,
+          merchantInsights,
+          candidateMerchants: negotiation.candidateMerchants ?? [],
+          bundleCandidates: negotiation.bundleCandidates ?? [],
+          analyticsEvents,
+          providerBudget,
+          discoveredMerchants,
+          assembledUserContext: userContextPipeline.assembledUserContext,
+          userNegotiationPosition: userContextPipeline.userNegotiationPosition,
+          agentTrace: userContextPipeline.agentTrace,
+          noOfferReason: "agent_failed",
+        },
+      });
+    }
     await repository.saveNegotiationDecision(decisionId, negotiation.negotiationBrief.briefId, negotiation.negotiationDecision);
     analyticsEvents.push(await clients.analytics.record({
       type: "negotiation_decision_created",
@@ -595,6 +827,13 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       }));
     }
 
+    let postNegotiationNoOfferReason: NoOfferReason | undefined;
+    if (!validationResult.valid) {
+      postNegotiationNoOfferReason = "validation_failed";
+    } else if (negotiation.negotiationDecision.decision === "no_offer") {
+      postNegotiationNoOfferReason = "negotiator_returned_no_offer";
+    }
+
     return completeRun({
       repository,
       idempotencyKey,
@@ -603,7 +842,7 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
         idempotencyKey,
         orchestrationStatus: "completed",
         matchedTriggers,
-        consumerContext,
+        consumerContext: negotiationContext,
         consumerAgentPosition,
         merchantInsights,
         candidateMerchants: negotiation.candidateMerchants,
@@ -615,6 +854,10 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
         analyticsEvents,
         providerBudget,
         discoveredMerchants,
+        assembledUserContext: userContextPipeline.assembledUserContext,
+        userNegotiationPosition: userContextPipeline.userNegotiationPosition,
+        agentTrace: userContextPipeline.agentTrace,
+        noOfferReason: postNegotiationNoOfferReason,
         nearbyMerchantSearch: {
           ...storedSupply.metadata,
           liveDiscoveryFallbackUsed: discoveredMerchants.length > 0,
@@ -634,16 +877,435 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
   }
 }
 
-function createIdempotencyKey(input: OrchestrateRequest) {
+type UserContextPipelineResult = {
+  assembledUserContext: AssembledUserContext | null;
+  userNegotiationPosition: UserNegotiationPosition | null;
+  agentTrace?: AgentTrace;
+  haltWithNoOffer: boolean;
+  noOfferReason?: NoOfferReason;
+  analyticsEvents: AnalyticsEvent[];
+};
+
+// Apply a mock profile's transient overrides on top of the user's persisted
+// UserProfile. Used by the dev simulator and any test harness so that a
+// "tourist" scenario actually widens the walking radius (etc.) for that run
+// without overwriting the user's saved preferences.
+function applyOverridesToUserProfile(
+  profile: UserProfile,
+  overrides: MockContextProfileOverrides | undefined,
+): UserProfile {
+  if (!overrides) return profile;
+  return {
+    ...profile,
+    walkingToleranceMeters: overrides.walkingToleranceMeters ?? profile.walkingToleranceMeters,
+    maxBundleStops: overrides.maxBundleStops ?? profile.maxBundleStops,
+    maxOffersPerHour: overrides.maxOffersPerHour ?? profile.maxOffersPerHour,
+    rewardPreference: overrides.rewardPreference ?? profile.rewardPreference,
+    privacyMode: overrides.privacyMode ?? profile.privacyMode,
+  };
+}
+
+// Mirror those overrides into the ConsumerContextSnapshot so candidate
+// filtering, validators, and the legacy consumer agent all see the same
+// effective constraints as the LLM agents.
+function applyOverridesToContext(
+  context: ConsumerContextSnapshot,
+  overrides: MockContextProfileOverrides | undefined,
+): ConsumerContextSnapshot {
+  if (!overrides) return context;
+  return {
+    ...context,
+    walkingToleranceMeters: overrides.walkingToleranceMeters ?? context.walkingToleranceMeters,
+    maxBundleStops: overrides.maxBundleStops ?? context.maxBundleStops,
+    maxOffersPerHour: overrides.maxOffersPerHour ?? context.maxOffersPerHour,
+    rewardPreference: overrides.rewardPreference ?? context.rewardPreference,
+    privacyMode: overrides.privacyMode ?? context.privacyMode,
+    declaredIntent: overrides.declaredIntent ?? context.declaredIntent,
+    availableMinutes: overrides.availableMinutes ?? context.availableMinutes,
+  };
+}
+
+async function runUserContextPipeline(input: {
+  userId: string;
+  mockProfile: MockContextProfile | null;
+  consumerContext: ConsumerContextSnapshot;
+  userProfile: UserProfile;
+  nearbyMerchantCount: number;
+  analyticsClient: AnalyticsServiceClient;
+  repository: ReturnType<typeof getRepository>;
+}): Promise<UserContextPipelineResult> {
+  const analyticsEvents: AnalyticsEvent[] = [];
+  const azureMode = isContextAgentMode();
+  const contextSnapshotId = input.consumerContext.snapshotId;
+
+  if (azureMode !== "azure_openai") {
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_context_assembler_skipped",
+      layer: "user_agent",
+      message: "User context assembler skipped: LLM_PROVIDER is not azure_openai.",
+      payload: { contextSnapshotId, reason: "azure_required" },
+    }));
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_negotiator_skipped",
+      layer: "user_agent",
+      message: "User negotiator skipped: LLM_PROVIDER is not azure_openai.",
+      payload: { contextSnapshotId, reason: "azure_required" },
+    }));
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "assembler",
+      provider: "skipped",
+      model: undefined,
+      latencyMs: undefined,
+      validationStatus: "skipped",
+      errorType: "azure_required",
+      outputJson: null,
+      createdAt: nowIso(),
+    });
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "user_negotiator",
+      provider: "skipped",
+      model: undefined,
+      latencyMs: undefined,
+      validationStatus: "skipped",
+      errorType: "azure_required",
+      outputJson: null,
+      createdAt: nowIso(),
+    });
+    return {
+      assembledUserContext: null,
+      userNegotiationPosition: null,
+      agentTrace: {
+        assembler: { provider: "skipped", validationStatus: "skipped", errorType: "azure_required" },
+        userNegotiator: { provider: "skipped", validationStatus: "skipped", errorType: "azure_required" },
+      },
+      haltWithNoOffer: false,
+      analyticsEvents,
+    };
+  }
+
+  const client = createDefaultJsonAgentClient();
+  if (!client) {
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_context_assembler_failed",
+      layer: "user_agent",
+      message: "User context assembler unavailable: Azure OpenAI client could not be created.",
+      payload: { contextSnapshotId, reason: "missing_config" },
+    }));
+    return {
+      assembledUserContext: null,
+      userNegotiationPosition: null,
+      agentTrace: {
+        assembler: { provider: "azure_openai", validationStatus: "failed", errorType: "missing_config" },
+        userNegotiator: null,
+      },
+      haltWithNoOffer: true,
+      noOfferReason: "agent_failed",
+      analyticsEvents,
+    };
+  }
+
+  const collected = await collectRawSignals({
+    userId: input.userId,
+    profile: input.mockProfile,
+    snapshot: input.consumerContext,
+    providers: defaultProviders,
+  });
+  const filtered = filterForLLM(collected.signals);
+  const signalsHash = computeSignalsHash({
+    profileId: input.mockProfile?.id ?? null,
+    profileVersion: input.mockProfile?.version ?? null,
+    signals: filtered.signals,
+  });
+
+  analyticsEvents.push(await input.analyticsClient.record({
+    type: "context_refreshed",
+    layer: "raw_context",
+    message: `Raw context signals collected (${collected.signals.length} sources, ${collected.disabledSources.length} disabled).`,
+    payload: {
+      contextSnapshotId,
+      enabledSources: collected.enabledSources,
+      disabledSources: collected.disabledSources,
+      signalsHash,
+      privacyMetadata: filtered.metadata,
+    },
+  }));
+
+  const agentTrace: AgentTrace = { assembler: null, userNegotiator: null };
+  let assembled: AssembledUserContext | null = null;
+  const assemblerTimeoutMs = Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 15000);
+  try {
+    const assembleResult = await assembleUserContext({
+      userId: input.userId,
+      contextSnapshotId,
+      bundle: filtered,
+      consumerSnapshot: input.consumerContext,
+      userProfile: input.userProfile,
+      client,
+      timeoutMs: assemblerTimeoutMs,
+    });
+    assembled = assembleResult.context;
+    agentTrace.assembler = {
+      validationStatus: assembleResult.validationStatus,
+      provider: assembleResult.provider,
+      model: assembleResult.model,
+      latencyMs: assembleResult.latencyMs,
+    };
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "assembler",
+      provider: assembleResult.provider,
+      model: assembleResult.model,
+      latencyMs: assembleResult.latencyMs,
+      validationStatus: assembleResult.validationStatus,
+      errorType: undefined,
+      outputJson: JSON.stringify(assembled),
+      createdAt: nowIso(),
+    });
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_context_assembled",
+      layer: "user_agent",
+      message: `User context assembled (status: ${assembleResult.validationStatus}, intent: ${assembled.inferredIntent}).`,
+      payload: { contextSnapshotId, validationStatus: assembleResult.validationStatus, latencyMs: assembleResult.latencyMs },
+    }));
+  } catch (error) {
+    const errorType = error instanceof LLMAgentError ? error.type : "unknown";
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[city-wallet] User context assembler failed (${errorType}): ${errorMessage}`,
+    );
+    agentTrace.assembler = { provider: "azure_openai", validationStatus: "failed", errorType };
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "assembler",
+      provider: "azure_openai",
+      model: undefined,
+      latencyMs: undefined,
+      validationStatus: "failed",
+      errorType,
+      outputJson: null,
+      createdAt: nowIso(),
+    });
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_context_assembler_failed",
+      layer: "user_agent",
+      message: `User context assembler failed: ${errorType}.`,
+      payload: { contextSnapshotId, errorType },
+    }));
+    return {
+      assembledUserContext: null,
+      userNegotiationPosition: null,
+      agentTrace,
+      haltWithNoOffer: true,
+      noOfferReason: "agent_failed",
+      analyticsEvents,
+    };
+  }
+
+  const negotiatorTimeoutMs = Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 15000);
+  let userNegotiationPosition: UserNegotiationPosition | null = null;
+  try {
+    const negotiatorResult = await runUserNegotiator({
+      userId: input.userId,
+      contextSnapshotId,
+      assembledContext: assembled,
+      consumerSnapshot: input.consumerContext,
+      userProfile: input.userProfile,
+      nearbyMerchantCount: input.nearbyMerchantCount,
+      client,
+      timeoutMs: negotiatorTimeoutMs,
+    });
+    userNegotiationPosition = negotiatorResult.position;
+    agentTrace.userNegotiator = {
+      validationStatus: negotiatorResult.validationStatus,
+      provider: negotiatorResult.provider,
+      model: negotiatorResult.model,
+      latencyMs: negotiatorResult.latencyMs,
+    };
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "user_negotiator",
+      provider: negotiatorResult.provider,
+      model: negotiatorResult.model,
+      latencyMs: negotiatorResult.latencyMs,
+      validationStatus: negotiatorResult.validationStatus,
+      errorType: undefined,
+      outputJson: JSON.stringify(userNegotiationPosition),
+      createdAt: nowIso(),
+    });
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_negotiator_position_built",
+      layer: "user_agent",
+      message: `User negotiator position built (status: ${negotiatorResult.validationStatus}, shouldNegotiate: ${userNegotiationPosition.shouldNegotiate}).`,
+      payload: { contextSnapshotId, validationStatus: negotiatorResult.validationStatus, latencyMs: negotiatorResult.latencyMs },
+    }));
+  } catch (error) {
+    const errorType = error instanceof LLMAgentError ? error.type : "unknown";
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[city-wallet] User negotiator agent failed (${errorType}): ${errorMessage}`,
+    );
+    agentTrace.userNegotiator = { provider: "azure_openai", validationStatus: "failed", errorType };
+    await input.repository.saveUserContextAgentRun({
+      id: makeId("ucar"),
+      userId: input.userId,
+      contextSnapshotId,
+      stage: "user_negotiator",
+      provider: "azure_openai",
+      model: undefined,
+      latencyMs: undefined,
+      validationStatus: "failed",
+      errorType,
+      outputJson: null,
+      createdAt: nowIso(),
+    });
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_negotiator_failed",
+      layer: "user_agent",
+      message: `User negotiator failed: ${errorType}.`,
+      payload: { contextSnapshotId, errorType },
+    }));
+    return {
+      assembledUserContext: assembled,
+      userNegotiationPosition: null,
+      agentTrace,
+      haltWithNoOffer: true,
+      noOfferReason: "agent_failed",
+      analyticsEvents,
+    };
+  }
+
+  if (!userNegotiationPosition.shouldNegotiate) {
+    analyticsEvents.push(await input.analyticsClient.record({
+      type: "user_negotiator_declined",
+      layer: "user_agent",
+      message: "User negotiator declined to negotiate; halting with no_offer.",
+      payload: { contextSnapshotId, evidence: userNegotiationPosition.evidence },
+    }));
+    return {
+      assembledUserContext: assembled,
+      userNegotiationPosition,
+      agentTrace,
+      haltWithNoOffer: true,
+      noOfferReason: "user_negotiator_declined",
+      analyticsEvents,
+    };
+  }
+
+  return {
+    assembledUserContext: assembled,
+    userNegotiationPosition,
+    agentTrace,
+    haltWithNoOffer: false,
+    analyticsEvents,
+  };
+}
+
+/**
+ * Returns an early-return OrchestrationResult if a row for `idempotencyKey`
+ * already exists and dictates one (cached completed result, "already running",
+ * or previously failed). Returns `null` if the caller may proceed to insert a
+ * new run.
+ *
+ * Also handles the stale-running edge case by marking the row failed and
+ * returning a "stale_orchestration_run" result so the caller can retry with a
+ * fresh idempotency key.
+ */
+async function resolveExistingOrchestrationRun(
+  repository: ReturnType<typeof getRepository>,
+  idempotencyKey: string,
+): Promise<OrchestrationResult | null> {
+  const existingRun = await repository.getOrchestrationRun(idempotencyKey);
+  if (!existingRun) return null;
+
+  if (existingRun.status === "completed" && existingRun.resultJson) {
+    return existingRun.resultJson as OrchestrationResult;
+  }
+
+  if (existingRun.status === "running") {
+    const stale = Date.now() - new Date(existingRun.updatedAt).getTime() > 2 * 60 * 1000;
+    if (!stale) {
+      return makeAlreadyRunningResult(idempotencyKey);
+    }
+    await repository.updateOrchestrationRun(idempotencyKey, {
+      status: "failed",
+      errorJson: {
+        reason: "stale_orchestration_run",
+        message: "A retry must use a new idempotency key from a new context/time bucket.",
+      },
+    });
+    return {
+      triggered: false,
+      reason: "stale_orchestration_run",
+      idempotencyKey,
+      orchestrationStatus: "failed",
+      retryAfterMs: 1_000,
+      matchedTriggers: [],
+      merchantInsights: [],
+      candidateMerchants: [],
+      bundleCandidates: [],
+      analyticsEvents: [],
+      discoveredMerchants: [],
+    };
+  }
+
+  if (existingRun.status === "failed") {
+    return {
+      triggered: false,
+      reason: "orchestration_failed",
+      idempotencyKey,
+      orchestrationStatus: "failed",
+      matchedTriggers: [],
+      merchantInsights: [],
+      candidateMerchants: [],
+      bundleCandidates: [],
+      analyticsEvents: [],
+      discoveredMerchants: [],
+    };
+  }
+
+  return null;
+}
+
+function makeAlreadyRunningResult(idempotencyKey: string): OrchestrationResult {
+  return {
+    triggered: false,
+    reason: "orchestration_already_running",
+    idempotencyKey,
+    orchestrationStatus: "running",
+    retryAfterMs: 2_000,
+    matchedTriggers: [],
+    merchantInsights: [],
+    candidateMerchants: [],
+    bundleCandidates: [],
+    analyticsEvents: [],
+    discoveredMerchants: [],
+  };
+}
+
+function createIdempotencyKey(input: OrchestrateRequest, activeMockProfile: MockContextProfile | null) {
   const locationKey = input.location
     ? `${roundCoordinate(input.location.latitude, 3)}:${roundCoordinate(input.location.longitude, 3)}`
     : "demo";
   const declaredKey = input.declaredContext?.intent ?? "default";
+  const profileKey = activeMockProfile ? `${activeMockProfile.id}@${activeMockProfile.version}` : "no_profile";
   return [
     input.userId,
     input.eventType,
     declaredKey,
     locationKey,
+    profileKey,
     timeBucketKey(new Date(), 5 * 60 * 1000),
   ].join(":");
 }
@@ -871,7 +1533,279 @@ function corsHeaders() {
   return {
     "content-type": "application/json",
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
     "access-control-allow-headers": "content-type,authorization",
+  };
+}
+
+const SIMULATOR_SOURCE_LABELS: Record<string, string> = {
+  calendar: "Calendar",
+  fitness: "Fitness",
+  mobility: "Mobility",
+  mood: "Mood",
+  payment_preference: "Payment preference",
+  social: "Social",
+  transit: "Transit",
+  dietary: "Dietary",
+  device_attention: "Device attention",
+  local_events: "Local events",
+  location: "Location",
+  active_zone: "Active zone",
+  weather: "Weather",
+  time: "Time of day",
+  merchant_density: "Local merchant density",
+};
+
+async function buildConnectedSourceChips(userId: string): Promise<ConnectedSourceChip[]> {
+  const repository = getRepository();
+  const profile = await repository.getActiveMockContextProfile(userId);
+  const enabled = profile?.enabledSources ?? {};
+  const mockKeys: string[] = [
+    "calendar",
+    "fitness",
+    "mobility",
+    "mood",
+    "payment_preference",
+    "social",
+    "transit",
+    "dietary",
+    "device_attention",
+    "local_events",
+  ];
+  const chips: ConnectedSourceChip[] = mockKeys.map((source) => ({
+    source,
+    label: SIMULATOR_SOURCE_LABELS[source] ?? source,
+    status: enabled[source] ? "simulated_for_demo" : "not_connected",
+  }));
+  for (const realSource of ["location", "active_zone", "weather", "time", "merchant_density"]) {
+    chips.push({
+      source: realSource,
+      label: SIMULATOR_SOURCE_LABELS[realSource] ?? realSource,
+      status: "connected",
+    });
+  }
+  return chips;
+}
+
+async function buildContextSummary(userId: string) {
+  const repository = getRepository();
+  const [context, lastRun, profile] = await Promise.all([
+    repository.getCurrentContext(userId),
+    repository.getLastDebugRun(),
+    repository.getActiveMockContextProfile(userId),
+  ]);
+  return {
+    context,
+    profileId: profile?.id ?? null,
+    profileVersion: profile?.version ?? 0,
+    assembledUserContext: lastRun?.assembledUserContext ?? null,
+    userNegotiationPosition: lastRun?.userNegotiationPosition ?? null,
+    noOfferReason: lastRun?.noOfferReason ?? null,
+    agentTrace: lastRun?.agentTrace ?? null,
+  };
+}
+
+async function handleDevSimulator(method: string, path: string, event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
+  const repository = getRepository();
+
+  if (method === "GET" && path === "/api/dev/context-simulator/scenarios") {
+    return json(200, scenarioPresets.map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      description: preset.description,
+      enabledSources: preset.enabledSources,
+      signalPayloads: preset.signalPayloads,
+      profileOverrides: preset.profileOverrides ?? null,
+    })));
+  }
+
+  if (method === "GET" && path === "/api/dev/context-simulator/profiles") {
+    const userId = event.queryStringParameters?.userId ?? "user_mia";
+    return json(200, await repository.listMockContextProfiles(userId));
+  }
+
+  const profileMatch = path.match(/^\/api\/dev\/context-simulator\/profiles\/([^/]+)$/);
+  if (method === "GET" && profileMatch) {
+    return json(200, await repository.getMockContextProfile(profileMatch[1]));
+  }
+
+  if (method === "DELETE" && profileMatch) {
+    await repository.deleteMockContextProfile(profileMatch[1]);
+    return json(200, { ok: true });
+  }
+
+  if (method === "POST" && path === "/api/dev/context-simulator/profiles") {
+    const upsert = MockContextProfileUpsertSchema.parse(readJson(event));
+    const now = nowIso();
+    const id = upsert.id ?? makeId("mock_profile");
+    const existing = upsert.id ? await repository.getMockContextProfile(upsert.id) : null;
+    const saved = await repository.saveMockContextProfile({
+      id,
+      userId: upsert.userId,
+      name: upsert.name,
+      enabledSources: upsert.enabledSources,
+      signalPayloads: upsert.signalPayloads,
+      profileOverrides: upsert.profileOverrides,
+      activeScenario: upsert.activeScenario ?? null,
+      isActive: existing?.isActive ?? false,
+      version: (existing?.version ?? 0) + 1,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+    });
+    if (upsert.setActive) {
+      const activated = await repository.setActiveMockContextProfile(upsert.userId, saved.id);
+      return json(200, activated ?? saved);
+    }
+    return json(200, saved);
+  }
+
+  const activateMatch = path.match(/^\/api\/dev\/context-simulator\/profiles\/([^/]+)\/activate$/);
+  if (method === "POST" && activateMatch) {
+    const body = (readJson(event) as { userId?: string }) ?? {};
+    const userId = body.userId ?? "user_mia";
+    const activated = await repository.setActiveMockContextProfile(userId, activateMatch[1]);
+    if (!activated) return json(404, { error: "Mock context profile not found." });
+    return json(200, activated);
+  }
+
+  if (method === "POST" && path === "/api/dev/context-simulator/preview") {
+    const request = DevSimulatorPreviewRequestSchema.parse(readJson(event));
+    return json(200, await runSimulatorPreview(request));
+  }
+
+  if (method === "POST" && path === "/api/dev/context-simulator/run-context") {
+    const body = (readJson(event) as { userId?: string }) ?? {};
+    const userId = body.userId ?? "user_mia";
+    const orchestrationResult = await orchestrate({
+      eventType: "ManualRefreshRequested",
+      userId,
+    });
+    return json(200, orchestrationResult);
+  }
+
+  return json(404, { error: `No dev simulator route for ${method} ${path}` });
+}
+
+async function runSimulatorPreview(request: { userId: string; profileId?: string; profileOverride?: unknown }): Promise<DevSimulatorPreviewResult> {
+  const repository = getRepository();
+  let profile: MockContextProfile | null = null;
+  if (request.profileOverride) {
+    const override = MockContextProfileUpsertSchema.parse(request.profileOverride);
+    const now = nowIso();
+    profile = {
+      id: override.id ?? "preview_profile",
+      userId: override.userId,
+      name: override.name,
+      enabledSources: override.enabledSources,
+      signalPayloads: override.signalPayloads,
+      profileOverrides: override.profileOverrides,
+      activeScenario: override.activeScenario ?? null,
+      isActive: false,
+      version: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+  } else if (request.profileId) {
+    profile = await repository.getMockContextProfile(request.profileId);
+  } else {
+    profile = await repository.getActiveMockContextProfile(request.userId);
+  }
+
+  const persistedUserProfile = await repository.getUserProfile(request.userId);
+  if (!persistedUserProfile) {
+    throw new Error(`Unknown user ${request.userId}`);
+  }
+  const baseContext = await repository.getCurrentContext(request.userId)
+    ?? await new ContextServiceClient(repository).buildContext({ userId: request.userId });
+
+  // Apply the (override or saved) profile's transient overrides so the
+  // preview reflects the same effective constraints the real orchestration
+  // would use under this profile.
+  const overrides = profile?.profileOverrides;
+  const userProfile = applyOverridesToUserProfile(persistedUserProfile, overrides);
+  const consumerContext = applyOverridesToContext(baseContext, overrides);
+
+  const collected = await collectRawSignals({
+    userId: request.userId,
+    profile,
+    snapshot: consumerContext,
+    providers: defaultProviders,
+  });
+  const filtered = filterForLLM(collected.signals);
+
+  const agentTrace: AgentTrace = { assembler: null, userNegotiator: null };
+  let assembledUserContext: AssembledUserContext | null = null;
+  let userNegotiationPosition: UserNegotiationPosition | null = null;
+  let errorMessage: string | undefined;
+
+  const azureMode = isContextAgentMode();
+  if (azureMode !== "azure_openai") {
+    agentTrace.assembler = { provider: "skipped", validationStatus: "skipped", errorType: "azure_required" };
+    agentTrace.userNegotiator = { provider: "skipped", validationStatus: "skipped", errorType: "azure_required" };
+    errorMessage = "Azure OpenAI is required to run the user-context agents. Set LLM_PROVIDER=azure_openai and configure Azure secrets.";
+  } else {
+    const client = createDefaultJsonAgentClient();
+    if (!client) {
+      agentTrace.assembler = { provider: "azure_openai", validationStatus: "failed", errorType: "missing_config" };
+      errorMessage = "Azure OpenAI client could not be created. Check AZURE_OPENAI_* env vars.";
+    } else {
+      try {
+        const assembleResult = await assembleUserContext({
+          userId: request.userId,
+          contextSnapshotId: consumerContext.snapshotId,
+          bundle: filtered,
+          consumerSnapshot: consumerContext,
+          userProfile,
+          client,
+          timeoutMs: Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 15000),
+        });
+        assembledUserContext = assembleResult.context;
+        agentTrace.assembler = {
+          provider: assembleResult.provider,
+          model: assembleResult.model,
+          latencyMs: assembleResult.latencyMs,
+          validationStatus: assembleResult.validationStatus,
+        };
+        const negotiatorResult = await runUserNegotiator({
+          userId: request.userId,
+          contextSnapshotId: consumerContext.snapshotId,
+          assembledContext: assembledUserContext,
+          consumerSnapshot: consumerContext,
+          userProfile,
+          nearbyMerchantCount: 0,
+          client,
+          timeoutMs: Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 15000),
+        });
+        userNegotiationPosition = negotiatorResult.position;
+        agentTrace.userNegotiator = {
+          provider: negotiatorResult.provider,
+          model: negotiatorResult.model,
+          latencyMs: negotiatorResult.latencyMs,
+          validationStatus: negotiatorResult.validationStatus,
+        };
+      } catch (error) {
+        const errorType = error instanceof LLMAgentError ? error.type : "unknown";
+        const stage = error instanceof LLMAgentError ? error.stage : "unknown";
+        const detail = error instanceof Error ? error.message : "Unknown agent failure during preview.";
+        console.warn(
+          `[city-wallet] dev simulator preview: ${stage} agent failed (${errorType}): ${detail}`,
+        );
+        if (!agentTrace.assembler) agentTrace.assembler = { provider: "azure_openai", validationStatus: "failed", errorType };
+        else if (!agentTrace.userNegotiator) agentTrace.userNegotiator = { provider: "azure_openai", validationStatus: "failed", errorType };
+        errorMessage = detail;
+      }
+    }
+  }
+
+  return {
+    contextSnapshotId: consumerContext.snapshotId,
+    enabledSources: collected.enabledSources,
+    disabledSources: collected.disabledSources,
+    privacyMetadata: filtered.metadata,
+    filteredSignals: filtered.signals,
+    assembledUserContext,
+    userNegotiationPosition,
+    agentTrace,
+    errorMessage,
   };
 }

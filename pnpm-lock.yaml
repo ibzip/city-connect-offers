@@ -144,12 +144,24 @@ importers:
       '@city-wallet/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@city-wallet/merchant-intelligence-domain':
+        specifier: workspace:*
+        version: link:../../packages/merchant-intelligence-domain
+      '@city-wallet/negotiation-domain':
+        specifier: workspace:*
+        version: link:../../packages/negotiation-domain
+      '@city-wallet/raw-context-domain':
+        specifier: workspace:*
+        version: link:../../packages/raw-context-domain
       '@city-wallet/redemption-domain':
         specifier: workspace:*
         version: link:../../packages/redemption-domain
       '@city-wallet/service-clients':
         specifier: workspace:*
         version: link:../../packages/service-clients
+      '@city-wallet/user-agent-domain':
+        specifier: workspace:*
+        version: link:../../packages/user-agent-domain
       '@city-wallet/utils':
         specifier: workspace:*
         version: link:../../packages/utils
@@ -421,6 +433,15 @@ importers:
         specifier: workspace:*
         version: link:../utils
 
+  packages/raw-context-domain:
+    dependencies:
+      '@city-wallet/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@city-wallet/utils':
+        specifier: workspace:*
+        version: link:../utils
+
   packages/redemption-domain:
     dependencies:
       '@city-wallet/contracts':
@@ -483,6 +504,18 @@ importers:
       tailwind-merge:
         specifier: ^2.6.0
         version: 2.6.1
+
+  packages/user-agent-domain:
+    dependencies:
+      '@city-wallet/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@city-wallet/utils':
+        specifier: workspace:*
+        version: link:../utils
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
 
   packages/utils: {}
 

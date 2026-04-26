@@ -1,18 +1,38 @@
 import { bundlePolicy, offerCopyConfig, offerPolicy, platformGoalModel, triggerConfig } from "@city-wallet/config";
-import type {
-  BundleCandidate,
-  CandidateMerchant,
-  ConsumerAgentPosition,
-  ConsumerContextSnapshot,
-  Merchant,
-  MerchantInsightSnapshot,
-  NegotiationBrief,
-  NegotiationDecision,
-  OfferType,
-  TriggerConfig,
-  UserEvent,
+import {
+  NegotiationDecisionSchema,
+  type AssembledUserContext,
+  type BundleCandidate,
+  type CandidateMerchant,
+  type ConsumerAgentPosition,
+  type ConsumerContextSnapshot,
+  type Merchant,
+  type MerchantInsightSnapshot,
+  type NegotiationBrief,
+  type NegotiationDecision,
+  type OfferType,
+  type TriggerConfig,
+  type UserEvent,
+  type UserNegotiationPosition,
 } from "@city-wallet/contracts";
 import { calculateDistanceMeters, makeId, nowIso, withTimeout } from "@city-wallet/utils";
+
+export class BackendNegotiatorError extends Error {
+  readonly type:
+    | "missing_config"
+    | "request_failed"
+    | "request_timeout"
+    | "empty_response"
+    | "json_parse_failed"
+    | "schema_validation_failed";
+  readonly cause?: unknown;
+  constructor(type: BackendNegotiatorError["type"], message: string, cause?: unknown) {
+    super(message);
+    this.name = "BackendNegotiatorError";
+    this.type = type;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
 
 export function evaluateUserTriggers(
   event: UserEvent,
@@ -25,8 +45,23 @@ export function selectCandidateMerchants(
   merchants: Merchant[],
   insights: MerchantInsightSnapshot[],
   context: ConsumerContextSnapshot,
+  options: {
+    userNegotiationPosition?: UserNegotiationPosition | null;
+    assembledUserContext?: AssembledUserContext | null;
+  } = {},
 ): CandidateMerchant[] {
-  const maxDistance = Math.max(context.walkingToleranceMeters, bundlePolicy.maxWalkingMeters);
+  const userMaxWalking = options.userNegotiationPosition?.hardConstraints.maxWalkingMeters
+    ?? options.assembledUserContext?.walkingToleranceMeters
+    ?? context.walkingToleranceMeters;
+  const maxDistance = Math.max(userMaxWalking, bundlePolicy.maxWalkingMeters);
+  const avoidCategories = new Set<string>([
+    ...(options.userNegotiationPosition?.softPreferences.avoidCategories ?? []),
+    ...(options.assembledUserContext?.avoidCategories ?? []),
+  ]);
+  const preferredCategories = new Set<string>([
+    ...(options.userNegotiationPosition?.softPreferences.preferredCategories ?? []),
+    ...(options.assembledUserContext?.likelyGoodCategories ?? []),
+  ]);
 
   return merchants.map((merchant) => {
     const insight = insights.find((candidate) => candidate.merchantId === merchant.id);
@@ -45,6 +80,8 @@ export function selectCandidateMerchants(
     const coordinateEligible = coordinatesAvailable;
     const status = merchant.participationStatus ?? "partner";
     const participationEligible = status === "partner";
+    const userPrefersAvoid = avoidCategories.has(merchant.category);
+    const userPrefersCategory = preferredCategories.has(merchant.category);
     const contextFit = calculateContextFit(merchant, insight, context);
 
     let fitScore = 0;
@@ -56,17 +93,20 @@ export function selectCandidateMerchants(
     fitScore += insight?.businessState === "very_quiet" ? 26 : insight?.businessState === "quiet" ? 18 : insight?.businessState === "normal" ? 6 : 0;
     fitScore += Math.round((insight?.bundleReadinessScore ?? 0) * 0.12);
     fitScore += contextFit;
-    fitScore = Math.min(100, fitScore);
+    if (userPrefersCategory) fitScore += 12;
+    if (userPrefersAvoid) fitScore -= 30;
+    fitScore = Math.max(0, Math.min(100, fitScore));
 
-    let considered = inZone && inWalkingRange && hasBudget && allowsOffer && hasInsight && participationEligible && coordinateEligible;
+    let considered = inZone && inWalkingRange && hasBudget && allowsOffer && hasInsight && participationEligible && coordinateEligible && !userPrefersAvoid;
     let rejectedReason: string | undefined;
     if (!inZone) rejectedReason = "outside the active zone";
     else if (!coordinateEligible) rejectedReason = "missing coordinates, excluded from distance-based eligibility";
-    else if (!inWalkingRange) rejectedReason = "beyond walking tolerance";
+    else if (!inWalkingRange) rejectedReason = "beyond user-negotiated walking tolerance";
     else if (!hasBudget) rejectedReason = "no remaining merchant budget";
     else if (!allowsOffer) rejectedReason = "no allowed offer types";
     else if (!hasInsight) rejectedReason = "missing merchant insight snapshot";
     else if (!participationEligible) rejectedReason = `${status} merchants are not eligible for offers`;
+    else if (userPrefersAvoid) rejectedReason = `user negotiator excluded category ${merchant.category}`;
     else if (insight?.businessState === "busy") {
       considered = false;
       rejectedReason = "merchant is busier than baseline";
@@ -85,7 +125,7 @@ export function selectCandidateMerchants(
       fitScore,
       considered,
       reason: considered
-        ? `${merchant.category} in zone, ${calculatedDistance}m away, ${insight?.businessState ?? "normal"} demand, ${status} supply, context fit ${contextFit}`
+        ? `${merchant.category} in zone, ${calculatedDistance}m away, ${insight?.businessState ?? "normal"} demand, ${status} supply, context fit ${contextFit}${userPrefersCategory ? ", user prefers category" : ""}`
         : rejectedReason ?? "not considered",
       rejectedReason,
     };
@@ -165,12 +205,16 @@ export function buildNegotiationBrief(input: {
   merchantInsights: MerchantInsightSnapshot[];
   candidateMerchants: CandidateMerchant[];
   bundleCandidates: BundleCandidate[];
+  assembledUserContext?: AssembledUserContext | null;
+  userNegotiationPosition?: UserNegotiationPosition | null;
 }): NegotiationBrief {
   return {
     briefId: makeId("brief"),
     userEvent: input.userEvent,
     consumerContext: input.consumerContext,
     consumerAgentPosition: input.consumerAgentPosition,
+    assembledUserContext: input.assembledUserContext ?? null,
+    userNegotiationPosition: input.userNegotiationPosition ?? null,
     merchantInsights: input.merchantInsights,
     candidateMerchants: input.candidateMerchants,
     bundleCandidates: input.bundleCandidates,
@@ -271,60 +315,195 @@ export class OpenAILLMClient implements LLMClient {
   }
 }
 
+export interface AzureOpenAILLMClientOptions {
+  fallback?: LLMClient;
+  allowMockFallback?: boolean;
+}
+
 export class AzureOpenAILLMClient implements LLMClient {
-  constructor(private readonly fallback: LLMClient = new MockLLMClient()) {}
+  private readonly fallback: LLMClient;
+  private readonly allowMockFallback: boolean;
+
+  constructor(options: AzureOpenAILLMClientOptions = {}) {
+    this.fallback = options.fallback ?? new MockLLMClient();
+    this.allowMockFallback = options.allowMockFallback ?? true;
+  }
 
   async generateNegotiationDecision(brief: NegotiationBrief, merchants: Merchant[] = []): Promise<NegotiationDecision> {
     const endpoint = process.env.AZURE_OPENAI_ENDPOINT;
     const deployment = process.env.AZURE_OPENAI_DEPLOYMENT;
     const apiKey = process.env.AZURE_OPENAI_API_KEY;
-    const apiVersion = process.env.AZURE_OPENAI_API_VERSION;
-    if (!endpoint || !deployment || !apiKey || !apiVersion) {
-      return this.fallback.generateNegotiationDecision(brief, merchants);
+    // AZURE_OPENAI_API_VERSION has a built-in default; only the secret-bearing
+    // vars are considered "missing config" for the strict negotiator.
+    const apiVersion = process.env.AZURE_OPENAI_API_VERSION && process.env.AZURE_OPENAI_API_VERSION.trim().length > 0
+      ? process.env.AZURE_OPENAI_API_VERSION
+      : "2024-10-21";
+    if (!endpoint || !deployment || !apiKey) {
+      if (this.allowMockFallback) return this.fallback.generateNegotiationDecision(brief, merchants);
+      throw new BackendNegotiatorError("missing_config", "Azure OpenAI environment variables are required for strict negotiation but were not provided (AZURE_OPENAI_ENDPOINT/DEPLOYMENT/API_KEY).");
     }
 
-    try {
-      const url = new URL(`/openai/deployments/${deployment}/chat/completions`, endpoint);
-      url.searchParams.set("api-version", apiVersion);
+    const url = new URL(`/openai/deployments/${deployment}/chat/completions`, endpoint);
+    url.searchParams.set("api-version", apiVersion);
+    const debug = process.env.DEBUG_LLM_AGENTS === "true";
+
+    const callAzure = async (messages: Array<{ role: string; content: string }>) => {
+      const requestBody: Record<string, unknown> = {
+        response_format: { type: "json_object" },
+        messages,
+      };
+      // Only forward `temperature` when the operator explicitly opted in via env.
+      // Reasoning-class Azure deployments (o1/o3/gpt-5) reject any non-default
+      // temperature; omitting the field lets the model use its native default.
+      const tempRaw = process.env.AZURE_OPENAI_TEMPERATURE;
+      if (tempRaw !== undefined && tempRaw !== "") {
+        const parsed = Number(tempRaw);
+        if (Number.isFinite(parsed)) requestBody.temperature = parsed;
+      }
       const response = await withTimeout(fetch(url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "api-key": apiKey,
-        },
-        body: JSON.stringify({
-          temperature: 0.1,
-          response_format: { type: "json_object" },
-          messages: [
-            {
-              role: "system",
-              content: "Return only a JSON object matching the City Wallet NegotiationDecision contract. Respect all validation constraints and avoid unsupported merchant claims.",
-            },
-            {
-              role: "user",
-              content: JSON.stringify({ brief, merchants }),
-            },
-          ],
-        }),
+        headers: { "content-type": "application/json", "api-key": apiKey },
+        body: JSON.stringify(requestBody),
       }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 15_000), "Azure OpenAI request");
-      if (!response.ok) throw new Error(`Azure OpenAI ${response.status}: ${await response.text()}`);
+      if (!response.ok) {
+        const text = await response.text();
+        throw new BackendNegotiatorError("request_failed", `Azure OpenAI ${response.status}: ${text}`);
+      }
       const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
       const content = body.choices?.[0]?.message?.content;
-      if (!content) throw new Error("Azure OpenAI returned no content");
-      const parsed = JSON.parse(content) as NegotiationDecision;
-      return parsed;
-    } catch {
-      return this.fallback.generateNegotiationDecision(brief, merchants);
+      if (!content) throw new BackendNegotiatorError("empty_response", "Azure OpenAI returned no content");
+      return content;
+    };
+
+    const tryParseAndValidate = (content: string): { ok: true; value: NegotiationDecision } | { ok: false; reason: string } => {
+      let raw: unknown;
+      try {
+        raw = JSON.parse(content);
+      } catch (cause) {
+        return { ok: false, reason: cause instanceof Error ? `JSON parse error: ${cause.message}` : "JSON parse error" };
+      }
+      const result = NegotiationDecisionSchema.safeParse(raw);
+      if (!result.success) {
+        const reason = result.error.issues.slice(0, 5).map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`).join("; ");
+        return { ok: false, reason };
+      }
+      return { ok: true, value: result.data };
+    };
+
+    try {
+      const baseMessages = [
+        { role: "system", content: NEGOTIATOR_SYSTEM_PROMPT },
+        { role: "user", content: JSON.stringify({ brief, merchants }) },
+      ];
+
+      const firstContent = await callAzure(baseMessages);
+      const firstAttempt = tryParseAndValidate(firstContent);
+      if (firstAttempt.ok) return firstAttempt.value;
+
+      if (debug) {
+        console.warn(
+          `[backend-negotiator] schema_validation_failed (attempt 1): ${firstAttempt.reason}\nraw: ${truncateForLog(firstContent)}`,
+        );
+      }
+
+      // One repair attempt: tell the model exactly what failed and re-ask.
+      const repairMessages = [
+        ...baseMessages,
+        { role: "assistant", content: firstContent },
+        {
+          role: "user",
+          content: `Your previous response did not match the NegotiationDecision schema. Issues: ${firstAttempt.reason}. Return ONLY a corrected JSON object that matches the schema exactly. Use the field names shown in the system prompt example (decision, selectedMerchants, validityMinutes, consumerIncentivesOffered, merchantIncentivesOffered, utilityAssessment, longTermGoalFit, reasoning, rejectedCandidates, consumerHeadline, consumerSubheadline, cta, confidence). Do not invent new field names.`,
+        },
+      ];
+      const repairContent = await callAzure(repairMessages);
+      const repairAttempt = tryParseAndValidate(repairContent);
+      if (repairAttempt.ok) return repairAttempt.value;
+
+      console.warn(
+        `[backend-negotiator] schema_validation_failed (repair attempt): ${repairAttempt.reason}\nraw: ${truncateForLog(repairContent)}`,
+      );
+      throw new BackendNegotiatorError(
+        "schema_validation_failed",
+        `Backend negotiator output failed schema validation after one repair attempt. Issues: ${repairAttempt.reason}`,
+      );
+    } catch (error) {
+      if (this.allowMockFallback) return this.fallback.generateNegotiationDecision(brief, merchants);
+      if (error instanceof BackendNegotiatorError) throw error;
+      throw new BackendNegotiatorError("request_failed", error instanceof Error ? error.message : "Azure OpenAI call failed", error);
     }
   }
 }
+
+function truncateForLog(value: string, max = 800): string {
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}...<truncated ${value.length - max} chars>`;
+}
+
+const NEGOTIATOR_SYSTEM_PROMPT = `You are City Wallet's backend negotiator. Given a NegotiationBrief and the list of candidate merchants, return ONLY a JSON object that matches the NegotiationDecision contract exactly. Do not add markdown, comments, or any text outside the JSON.
+
+The JSON object MUST have this exact shape (field names, types, and enums are mandatory):
+
+{
+  "decision": "single_offer",
+  "selectedMerchants": [
+    {
+      "merchantId": "cafe_mueller",
+      "product": "Cappuccino",
+      "incentive": { "type": "cashback", "percent": 10, "valueText": "10% cashback" },
+      "roleInJourney": "warm_break"
+    }
+  ],
+  "validityMinutes": 30,
+  "consumerIncentivesOffered": ["10% cashback on Cappuccino"],
+  "merchantIncentivesOffered": ["surface during the next 30 minutes"],
+  "utilityAssessment": {
+    "consumer": { "score": 82, "whyPositive": ["matches warm break intent"], "risks": [] },
+    "merchants": [
+      { "merchantId": "cafe_mueller", "score": 70, "whyPositive": ["fills quiet window"], "risks": ["small margin hit"] }
+    ],
+    "platform": { "score": 76, "whyPositive": ["high context fit"], "risks": [] }
+  },
+  "longTermGoalFit": {
+    "consumer": ["repeat exposure to favoured cafes"],
+    "merchants": ["loyalty during quiet hours"],
+    "platform": ["increase weekly active users"]
+  },
+  "reasoning": ["Cafe is 76m away on a cold morning; cashback fits the user's reward preference."],
+  "rejectedCandidates": [],
+  "consumerHeadline": "Warm cappuccino, 10% cashback",
+  "consumerSubheadline": "Cafe Mueller - 76m walk",
+  "cta": "Claim offer",
+  "confidence": 0.88
+}
+
+Rules:
+- "decision" MUST be exactly one of: "no_offer" | "single_offer" | "bundle_offer". Do NOT use "propose_offer" or any other value.
+- Use "selectedMerchants" (array). Do NOT use "selectedOffer".
+- "selectedMerchants[].incentive.type" MUST be one of: "cashback" | "discount" | "priority_pickup" | "bundle_unlock".
+- "selectedMerchants[].incentive.percent" is OPTIONAL (number 0-100); "valueText" is REQUIRED (string).
+- "validityMinutes" MUST be a positive integer.
+- All "score" fields are numbers in [0, 100]. "confidence" is a number in [0, 1].
+- "reasoning", "consumerIncentivesOffered", "merchantIncentivesOffered" are arrays of strings.
+- "rejectedCandidates" is an array of { "id": string, "reason": string }.
+- For a "no_offer" decision, set "selectedMerchants" to [] and explain in "reasoning".
+- Respect the brief's hard constraints (max walking distance, max bundle stops, allowed offer types) and the user's negotiation position. Stay within merchant rule caps (maxDiscountPercent, dailyBudgetRemainingEuro, offerTypesAllowed).
+
+Three-sided utility:
+- Each merchant in the "merchants" array carries a "goals" field (array of MerchantGoal { merchantId, goal }). These are the merchant's own commercial objectives (e.g. "sustainable_quiet_hour_lift", "introduce_new_product_line", "loyalty_during_quiet_hours"). Treat them as a soft signal: when picking between candidates with similar consumer fit, prefer the one whose goals best match the current context (e.g. quiet-hour goals fit a "very_quiet" or "quiet" businessState; new-product goals fit when the user's intent is "browsing" or "discovery").
+- The brief's "platformGoalModel.goals" lists platform-level objectives. Use them to break further ties.
+- The "utilityAssessment.merchants[].whyPositive" array is where you justify each merchant's score against its own goals - cite the matching goal in plain language. The "utilityAssessment.merchants[].risks" array is where you call out any goal mismatch (e.g. "merchant goal is loyalty_growth but offer has no repeat-visit hook").
+- "longTermGoalFit.merchants" should reflect how the offer compounds toward the merchant's stated goals over time, not just this single visit.`;
 
 export async function runNegotiation(input: {
   brief: NegotiationBrief;
   merchants: Merchant[];
   llmClient?: LLMClient;
+  strictAzure?: boolean;
 }) {
-  const client = input.llmClient ?? (process.env.LLM_PROVIDER === "azure_openai" ? new AzureOpenAILLMClient() : new MockLLMClient());
+  const isAzureMode = process.env.LLM_PROVIDER === "azure_openai";
+  const strict = input.strictAzure ?? isAzureMode;
+  const client = input.llmClient
+    ?? (isAzureMode ? new AzureOpenAILLMClient({ allowMockFallback: !strict }) : new MockLLMClient());
   return client.generateNegotiationDecision(input.brief, input.merchants);
 }
 

@@ -30,7 +30,10 @@ export const seededUserProfile: UserProfile = {
   displayName: "Mia",
   privacyMode: "high",
   rewardPreference: "cashback",
-  walkingToleranceMeters: 250,
+  // 600m is a comfortable few-minute walk and matches the radius of imported
+  // city merchants out-of-the-box. Users can tighten or loosen this from the
+  // wallet's Preferences sheet at any time.
+  walkingToleranceMeters: 600,
   maxBundleStops: 2,
   maxOffersPerHour: 1,
 };
@@ -57,7 +60,7 @@ export const seededConsumerContext: ConsumerContextSnapshot = {
   availableMinutes: 30,
   rewardPreference: "cashback",
   privacyMode: "high",
-  walkingToleranceMeters: 250,
+  walkingToleranceMeters: 600,
   maxBundleStops: 2,
   maxOffersPerHour: 1,
   normalizedSignals: [],

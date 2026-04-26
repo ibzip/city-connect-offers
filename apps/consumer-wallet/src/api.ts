@@ -1,4 +1,16 @@
-import type { OrchestrateRequest, OrchestrationResult, RedemptionResult, RedemptionToken } from "@city-wallet/contracts";
+import type {
+  ConnectedSourceChip,
+  DevSimulatorPreviewRequest,
+  DevSimulatorPreviewResult,
+  MockContextProfile,
+  MockContextProfileUpsert,
+  OrchestrateRequest,
+  OrchestrationResult,
+  RedemptionResult,
+  RedemptionToken,
+  UserProfile,
+  UserProfileUpdate,
+} from "@city-wallet/contracts";
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:3010";
 const API_BASE_STORAGE_KEY = "city_wallet_api_base_url";
@@ -35,6 +47,34 @@ export async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetchWithApiError(`${baseUrl}${path}`, { method: "DELETE" }, baseUrl);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<T>;
+}
+
+export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
+  const baseUrl = getApiBaseUrl();
+  const response = await fetchWithApiError(`${baseUrl}${path}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  }, baseUrl);
+  if (!response.ok) throw new Error(await response.text());
+  return response.json() as Promise<T>;
+}
+
+export async function apiProbeStatus(path: string): Promise<number> {
+  const baseUrl = getApiBaseUrl();
+  try {
+    const response = await fetch(`${baseUrl}${path}`, { method: "GET", cache: "no-store" });
+    return response.status;
+  } catch {
+    return 0;
+  }
+}
+
 export function orchestrate(request: OrchestrateRequest) {
   return apiPost<OrchestrationResult>("/api/orchestrate", request);
 }
@@ -45,6 +85,79 @@ export function claimOffer(offerId: string) {
 
 export function redeem(code: string, merchantId: string) {
   return apiPost<RedemptionResult>("/api/redemption/redeem", { code, merchantId });
+}
+
+export function fetchConnectedSources(userId: string) {
+  return apiGet<ConnectedSourceChip[]>(`/api/consumer/connected-sources?userId=${encodeURIComponent(userId)}`);
+}
+
+export function fetchContextSummary(userId: string) {
+  return apiGet<{
+    context: unknown;
+    profileId: string | null;
+    profileVersion: number;
+    assembledUserContext: unknown;
+    userNegotiationPosition: unknown;
+    noOfferReason: string | null;
+    agentTrace: unknown;
+  }>(`/api/consumer/context-summary?userId=${encodeURIComponent(userId)}`);
+}
+
+export function fetchContextProfileVersion(userId: string) {
+  return apiGet<{ profileId: string | null; version: number; updatedAt: string | null }>(
+    `/api/consumer/context-profile-version?userId=${encodeURIComponent(userId)}`,
+  );
+}
+
+export function updateUserProfile(userId: string, update: UserProfileUpdate) {
+  return apiPatch<UserProfile>(`/api/consumer/profile?userId=${encodeURIComponent(userId)}`, update);
+}
+
+export function listMockContextProfiles(userId: string) {
+  return apiGet<MockContextProfile[]>(`/api/dev/context-simulator/profiles?userId=${encodeURIComponent(userId)}`);
+}
+
+export function getMockContextProfile(profileId: string) {
+  return apiGet<MockContextProfile | null>(`/api/dev/context-simulator/profiles/${encodeURIComponent(profileId)}`);
+}
+
+export function saveMockContextProfile(profile: MockContextProfileUpsert) {
+  return apiPost<MockContextProfile>(`/api/dev/context-simulator/profiles`, profile);
+}
+
+export function activateMockContextProfile(profileId: string, userId: string) {
+  return apiPost<MockContextProfile>(`/api/dev/context-simulator/profiles/${encodeURIComponent(profileId)}/activate`, { userId });
+}
+
+export function deleteMockContextProfile(profileId: string) {
+  return apiDelete<{ ok: true }>(`/api/dev/context-simulator/profiles/${encodeURIComponent(profileId)}`);
+}
+
+export function listScenarios() {
+  return apiGet<Array<{
+    id: string;
+    label: string;
+    description: string;
+    enabledSources: Record<string, boolean>;
+    signalPayloads: Record<string, unknown>;
+    profileOverrides: {
+      walkingToleranceMeters?: number;
+      maxBundleStops?: number;
+      maxOffersPerHour?: number;
+      rewardPreference?: "cashback" | "discount" | "either";
+      privacyMode?: "low" | "medium" | "high";
+      declaredIntent?: string;
+      availableMinutes?: number;
+    } | null;
+  }>>(`/api/dev/context-simulator/scenarios`);
+}
+
+export function previewSimulator(request: DevSimulatorPreviewRequest) {
+  return apiPost<DevSimulatorPreviewResult>(`/api/dev/context-simulator/preview`, request);
+}
+
+export function runSimulatorContext(userId: string) {
+  return apiPost<OrchestrationResult>(`/api/dev/context-simulator/run-context`, { userId });
 }
 
 function normalizeBaseUrl(value: string) {

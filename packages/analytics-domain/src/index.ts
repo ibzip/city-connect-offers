@@ -39,7 +39,7 @@ export async function buildMerchantDashboardMetrics(
   };
   const limit = Math.min(Math.max(query.merchantLimit ?? 50, 1), 200);
   const offset = Math.max(query.merchantOffset ?? 0, 0);
-  const [merchants, merchantTotal, summaryMerchants, insights, densitySignals, offers, tokens, events, currentContext, zones, importRuns] = await Promise.all([
+  const [merchants, merchantTotal, summaryMerchants, insights, densitySignals, offers, tokens, events, currentContext, zones, importRuns, lastDebugRun] = await Promise.all([
     repository.listMerchants({ ...merchantFilter, limit, offset }),
     repository.countMerchants(merchantFilter),
     repository.listMerchants(merchantFilter),
@@ -51,6 +51,7 @@ export async function buildMerchantDashboardMetrics(
     repository.getLatestContext(),
     repository.listCommerceZones(),
     repository.listMerchantImportRuns(),
+    repository.getLastDebugRun().catch(() => null),
   ]);
 
   return {
@@ -96,6 +97,11 @@ export async function buildMerchantDashboardMetrics(
     zones,
     importRuns,
     currentContext,
+    latestAssembledUserContext: lastDebugRun?.assembledUserContext ?? null,
+    latestUserNegotiationPosition: lastDebugRun?.userNegotiationPosition ?? null,
+    latestAgentTrace: lastDebugRun?.agentTrace,
+    latestNegotiationReasoning: lastDebugRun?.negotiationDecision?.reasoning ?? [],
+    latestNoOfferReason: lastDebugRun?.noOfferReason ?? null,
     events,
   };
 }

@@ -3,7 +3,7 @@ import { Badge, Button, Card, StatCard, ValidityPill } from "./primitives";
 
 export function PhoneFrame({ children }: { children: React.ReactNode }) {
   return (
-    <div className="surface-card mx-auto flex h-[760px] w-full max-w-[380px] flex-col overflow-hidden rounded-[2rem]">
+    <div className="surface-card relative mx-auto flex h-[760px] w-full max-w-[380px] flex-col overflow-hidden rounded-[2rem]">
       {children}
     </div>
   );

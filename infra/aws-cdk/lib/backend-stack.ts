@@ -109,6 +109,12 @@ export class CityWalletBackendStack extends Stack {
       ENABLE_OVERPASS_IMPORT_FALLBACK: process.env.ENABLE_OVERPASS_IMPORT_FALLBACK ?? "true",
       ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK: process.env.ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK ?? "false",
       ENABLE_DEV_RESET: process.env.ENABLE_DEV_RESET ?? "false",
+      ENABLE_DEV_CONTEXT_SIMULATOR: process.env.ENABLE_DEV_CONTEXT_SIMULATOR ?? "false",
+      CONTEXT_SNAPSHOT_TTL_MINUTES: process.env.CONTEXT_SNAPSHOT_TTL_MINUTES ?? "15",
+      LOCATION_CHANGE_THRESHOLD_METERS: process.env.LOCATION_CHANGE_THRESHOLD_METERS ?? "50",
+      USER_CONTEXT_AGENT_TIMEOUT_MS: process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? "12000",
+      USER_NEGOTIATOR_AGENT_TIMEOUT_MS: process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? "12000",
+      DEBUG_STORE_RAW_CONTEXT: process.env.DEBUG_STORE_RAW_CONTEXT ?? "false",
       ...serviceUrlEnvironment,
     }, props.vpc, props.lambdaSecurityGroup);
     props.dbSecret.grantRead(apiGatewayFunction);
@@ -145,6 +151,12 @@ export class CityWalletBackendStack extends Stack {
         ENABLE_OVERPASS_IMPORT_FALLBACK: process.env.ENABLE_OVERPASS_IMPORT_FALLBACK ?? "true",
         ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK: process.env.ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK ?? "false",
         ENABLE_DEV_RESET: process.env.ENABLE_DEV_RESET ?? "false",
+        ENABLE_DEV_CONTEXT_SIMULATOR: process.env.ENABLE_DEV_CONTEXT_SIMULATOR ?? "false",
+        CONTEXT_SNAPSHOT_TTL_MINUTES: process.env.CONTEXT_SNAPSHOT_TTL_MINUTES ?? "15",
+        LOCATION_CHANGE_THRESHOLD_METERS: process.env.LOCATION_CHANGE_THRESHOLD_METERS ?? "50",
+        USER_CONTEXT_AGENT_TIMEOUT_MS: process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? "12000",
+        USER_NEGOTIATOR_AGENT_TIMEOUT_MS: process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? "12000",
+        DEBUG_STORE_RAW_CONTEXT: process.env.DEBUG_STORE_RAW_CONTEXT ?? "false",
       }, props.vpc, props.lambdaSecurityGroup);
       props.dbSecret.grantRead(fn);
       for (const route of app.routes) {

@@ -18,20 +18,33 @@ export function schemaValidator(decision: NegotiationDecision): ValidationCheck 
   };
 }
 
+function selectedMerchantsOf(decision: NegotiationDecision): NegotiationDecision["selectedMerchants"] {
+  // Defensive: a malformed decision (e.g. from a misbehaving LLM that bypassed
+  // schema validation) may not have `selectedMerchants` set. Treat as empty so
+  // validators report `passed: false` instead of crashing the whole pipeline.
+  return Array.isArray(decision?.selectedMerchants) ? decision.selectedMerchants : [];
+}
+
 export function merchantExistsValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
   const ids = new Set(merchants.map((merchant) => merchant.id));
-  const passed = decision.selectedMerchants.every((selection) => ids.has(selection.merchantId));
+  const selections = selectedMerchantsOf(decision);
+  const passed = selections.length > 0 && selections.every((selection) => ids.has(selection.merchantId));
   return {
     validator: "merchant_exists",
     passed,
-    detail: passed ? "All selected merchants exist." : "Decision references an unknown merchant.",
+    detail: passed
+      ? "All selected merchants exist."
+      : selections.length === 0
+        ? "Decision is missing selectedMerchants."
+        : "Decision references an unknown merchant.",
   };
 }
 
 export function discountCapValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const passed = decision.selectedMerchants.every((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const passed = selections.every((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
-    const percent = selection.incentive.percent ?? 0;
+    const percent = selection.incentive?.percent ?? 0;
     return percent <= (merchant?.rule?.maxDiscountPercent ?? 0) && percent <= offerPolicy.maxDiscountPercent;
   });
   return {
@@ -42,10 +55,11 @@ export function discountCapValidator(decision: NegotiationDecision, merchants: M
 }
 
 export function merchantBudgetValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const passed = decision.selectedMerchants.every((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const passed = selections.every((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     const product = merchant?.products.find((candidate) => candidate.name === selection.product);
-    const cashback = (product?.priceEuro ?? 0) * ((selection.incentive.percent ?? 0) / 100);
+    const cashback = (product?.priceEuro ?? 0) * ((selection.incentive?.percent ?? 0) / 100);
     return cashback <= (merchant?.rule?.dailyBudgetRemainingEuro ?? 0);
   });
   return {
@@ -56,11 +70,12 @@ export function merchantBudgetValidator(decision: NegotiationDecision, merchants
 }
 
 export function bundleSizeValidator(decision: NegotiationDecision): ValidationCheck {
-  const passed = decision.decision !== "bundle_offer" || decision.selectedMerchants.length <= bundlePolicy.maxMerchantsPerBundle;
+  const selections = selectedMerchantsOf(decision);
+  const passed = decision.decision !== "bundle_offer" || selections.length <= bundlePolicy.maxMerchantsPerBundle;
   return {
     validator: "bundle_size",
     passed,
-    detail: `Bundle contains ${decision.selectedMerchants.length} merchants; max is ${bundlePolicy.maxMerchantsPerBundle}.`,
+    detail: `Bundle contains ${selections.length} merchants; max is ${bundlePolicy.maxMerchantsPerBundle}.`,
   };
 }
 
@@ -69,7 +84,8 @@ export function walkingDistanceValidator(
   merchants: Merchant[],
   context: ConsumerContextSnapshot,
 ): ValidationCheck {
-  const totalDistance = decision.selectedMerchants.reduce((sum, selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const totalDistance = selections.reduce((sum, selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     if (merchant && context.userLocation && merchant.latitude !== undefined && merchant.longitude !== undefined) {
       return sum + calculateDistanceMeters(context.userLocation.latitude, context.userLocation.longitude, merchant.latitude, merchant.longitude);
@@ -85,7 +101,8 @@ export function walkingDistanceValidator(
 }
 
 export function participationStatusValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const failed = decision.selectedMerchants.find((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const failed = selections.find((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     const status = merchant?.participationStatus ?? "partner";
     return status !== "partner";
@@ -100,7 +117,8 @@ export function participationStatusValidator(decision: NegotiationDecision, merc
 }
 
 export function coordinateRequiredValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const passed = decision.selectedMerchants.every((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const passed = selections.length > 0 && selections.every((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     return merchant?.latitude !== undefined && merchant.longitude !== undefined;
   });
@@ -112,7 +130,8 @@ export function coordinateRequiredValidator(decision: NegotiationDecision, merch
 }
 
 export function merchantConsentValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const passed = decision.decision !== "bundle_offer" || decision.selectedMerchants.every((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const passed = decision.decision !== "bundle_offer" || selections.every((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     return Boolean(merchant?.rule?.allowsBundles);
   });
@@ -134,11 +153,14 @@ export function privacyValidator(decision: NegotiationDecision): ValidationCheck
 }
 
 export function offerTypeValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const passed = decision.selectedMerchants.every((selection) => {
+  const selections = selectedMerchantsOf(decision);
+  const passed = selections.length > 0 && selections.every((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
+    const offerType = selection.incentive?.type;
     return Boolean(
-      merchant?.rule?.offerTypesAllowed.includes(selection.incentive.type) &&
-      offerPolicy.allowedOfferTypes.includes(selection.incentive.type),
+      offerType &&
+      merchant?.rule?.offerTypesAllowed.includes(offerType) &&
+      offerPolicy.allowedOfferTypes.includes(offerType),
     );
   });
   return {
@@ -153,17 +175,30 @@ export function validateNegotiationDecision(input: {
   merchants: Merchant[];
   context: ConsumerContextSnapshot;
 }): ValidationResult {
+  // If the decision payload is missing or fails the shared contract, short-circuit
+  // with just the schema check. The downstream validators assume a well-shaped
+  // decision and would otherwise throw on undefined fields.
+  const schemaCheck = schemaValidator(input.decision);
+  if (!schemaCheck.passed) {
+    return {
+      valid: false,
+      errors: [`${schemaCheck.validator}: ${schemaCheck.detail}`],
+      warnings: ["Schema validation failed; merchant-specific validators skipped."],
+      checks: [schemaCheck],
+    };
+  }
+
   if (input.decision.decision === "no_offer") {
     return {
       valid: true,
       errors: [],
       warnings: ["No offer decision; validators skipped offer-specific checks."],
-      checks: [schemaValidator(input.decision)],
+      checks: [schemaCheck],
     };
   }
 
   const checks = [
-    schemaValidator(input.decision),
+    schemaCheck,
     merchantExistsValidator(input.decision, input.merchants),
     discountCapValidator(input.decision, input.merchants),
     merchantBudgetValidator(input.decision, input.merchants),
