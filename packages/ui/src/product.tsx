@@ -23,10 +23,8 @@ export function OfferCard({
       <div className="relative overflow-hidden rounded-xl bg-teal p-5">
         <div className="absolute inset-0 bg-gradient-to-t from-black/35 to-transparent" />
         <div className="relative z-10">
-          {offer.isSimulatedDemoOffer ? <Badge tone="orange">Simulated demo offer</Badge> : null}
           <h3 className="text-balance font-serif text-xl font-medium leading-tight text-white">{offer.headline}</h3>
           <p className="mt-1 text-sm text-white/80">{offer.subheadline}</p>
-          {offer.disclosure ? <p className="mt-2 text-xs text-white/75">{offer.disclosure}</p> : null}
         </div>
       </div>
       <BundleOfferCard offer={offer} />
@@ -48,7 +46,6 @@ export function BundleOfferCard({ offer }: { offer: Offer }) {
             <div className="flex min-w-0 items-center gap-2">
               <div className="h-2 w-2 shrink-0 rounded-full bg-teal" />
             <span className="truncate font-medium">{item.merchantName}</span>
-            {item.isSimulatedDemoOffer ? <Badge tone="orange">demo</Badge> : null}
           </div>
             <span className="shrink-0 text-xs text-ink-muted">
               {item.product} · {item.incentivePercent}% cashback · {item.distanceMeters}m
@@ -73,13 +70,7 @@ export function MerchantPulseCard({
           <h3 className="font-serif text-xl">{metric.merchant.name}</h3>
           <p className="font-mono text-xs uppercase tracking-wider text-ink-muted">{metric.merchant.category}</p>
           <div className="mt-2 flex flex-wrap gap-2">
-            <Badge tone={metric.merchant.participationStatus === "demo_partner" ? "orange" : metric.merchant.participationStatus?.startsWith("discovered") ? "blue" : "green"}>
-              {metric.merchant.participationStatus === "demo_partner" && metric.merchant.source === "google_places"
-                ? "Demo-onboarded from Google Places discovery"
-                : metric.merchant.participationStatus === "demo_partner" && metric.merchant.source === "osm_overpass"
-                ? "Demo-onboarded from OSM discovery"
-                : metric.merchant.participationStatus === "demo_partner" ? "Demo-onboarded from discovery" : metric.merchant.participationStatus ?? "partner"}
-            </Badge>
+            <Badge tone="green">{metric.merchant.participationStatus ?? "partner"}</Badge>
             {metric.merchant.source ? <Badge>{metric.merchant.source}</Badge> : null}
           </div>
         </div>

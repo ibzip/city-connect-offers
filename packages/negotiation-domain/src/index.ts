@@ -44,8 +44,7 @@ export function selectCandidateMerchants(
     const hasInsight = Boolean(insight);
     const coordinateEligible = coordinatesAvailable;
     const status = merchant.participationStatus ?? "partner";
-    const demoAllowed = process.env.DEMO_MODE === "true" && process.env.ALLOW_DEMO_PARTNER_OFFERS === "true";
-    const participationEligible = status === "partner" || (status === "demo_partner" && demoAllowed);
+    const participationEligible = status === "partner";
     const contextFit = calculateContextFit(merchant, insight, context);
 
     let fitScore = 0;
@@ -67,9 +66,7 @@ export function selectCandidateMerchants(
     else if (!hasBudget) rejectedReason = "no remaining merchant budget";
     else if (!allowsOffer) rejectedReason = "no allowed offer types";
     else if (!hasInsight) rejectedReason = "missing merchant insight snapshot";
-    else if (!participationEligible) rejectedReason = status === "demo_partner"
-      ? "demo partner offers disabled"
-      : `${status} merchants are not eligible for offers`;
+    else if (!participationEligible) rejectedReason = `${status} merchants are not eligible for offers`;
     else if (insight?.businessState === "busy") {
       considered = false;
       rejectedReason = "merchant is busier than baseline";
@@ -84,7 +81,6 @@ export function selectCandidateMerchants(
       participationStatus: status,
       calculatedFromCoordinates,
       coordinateEligible,
-      demoDisclosure: merchant.demoDisclosure,
       businessState: insight?.businessState ?? "normal",
       fitScore,
       considered,

@@ -107,8 +107,6 @@ export class CityWalletBackendStack extends Stack {
       GOOGLE_PLACES_DEFAULT_RADIUS_METERS: process.env.GOOGLE_PLACES_DEFAULT_RADIUS_METERS ?? "20000",
       GOOGLE_PLACES_TIMEOUT_MS: process.env.GOOGLE_PLACES_TIMEOUT_MS ?? "6000",
       ENABLE_OVERPASS_IMPORT_FALLBACK: process.env.ENABLE_OVERPASS_IMPORT_FALLBACK ?? "true",
-      DEMO_MODE: process.env.DEMO_MODE ?? "true",
-      ALLOW_DEMO_PARTNER_OFFERS: process.env.ALLOW_DEMO_PARTNER_OFFERS ?? "true",
       ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK: process.env.ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK ?? "false",
       ENABLE_DEV_RESET: process.env.ENABLE_DEV_RESET ?? "false",
       ...serviceUrlEnvironment,
@@ -145,8 +143,6 @@ export class CityWalletBackendStack extends Stack {
         GOOGLE_PLACES_DEFAULT_RADIUS_METERS: process.env.GOOGLE_PLACES_DEFAULT_RADIUS_METERS ?? "20000",
         GOOGLE_PLACES_TIMEOUT_MS: process.env.GOOGLE_PLACES_TIMEOUT_MS ?? "6000",
         ENABLE_OVERPASS_IMPORT_FALLBACK: process.env.ENABLE_OVERPASS_IMPORT_FALLBACK ?? "true",
-        DEMO_MODE: process.env.DEMO_MODE ?? "true",
-        ALLOW_DEMO_PARTNER_OFFERS: process.env.ALLOW_DEMO_PARTNER_OFFERS ?? "true",
         ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK: process.env.ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK ?? "false",
         ENABLE_DEV_RESET: process.env.ENABLE_DEV_RESET ?? "false",
       }, props.vpc, props.lambdaSecurityGroup);

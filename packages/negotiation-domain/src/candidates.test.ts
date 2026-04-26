@@ -27,22 +27,22 @@ const context: ConsumerContextSnapshot = {
   createdAt: new Date().toISOString(),
 };
 
-function merchant(participationStatus: Merchant["participationStatus"], withCoordinates = true): Merchant {
+function merchant(id: string, withCoordinates = true): Merchant {
   return {
-    id: participationStatus,
-    name: participationStatus,
+    id,
+    name: id,
     category: "cafe",
     zoneId: "zone",
     distanceMeters: 50,
     latitude: withCoordinates ? 48.7752 : undefined,
     longitude: withCoordinates ? 9.1772 : undefined,
-    participationStatus,
+    participationStatus: "partner",
     source: "seeded",
     syntheticFields: [],
-    products: [{ id: "prod", merchantId: participationStatus, name: "Cappuccino", priceEuro: 4, category: "warm_drink" }],
+    products: [{ id: "prod", merchantId: id, name: "Cappuccino", priceEuro: 4, category: "warm_drink" }],
     goals: [],
     rule: {
-      merchantId: participationStatus,
+      merchantId: id,
       maxDiscountPercent: 15,
       dailyBudgetEuro: 20,
       dailyBudgetRemainingEuro: 20,
@@ -70,26 +70,9 @@ function insight(merchantId: string): MerchantInsightSnapshot {
   };
 }
 
-test("candidate selection excludes coordinate-less and discovered-only merchants", () => {
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
-  const merchants = [
-    merchant("partner"),
-    merchant("discovered_only"),
-    merchant("demo_partner", false),
-  ];
+test("candidate selection considers partners with coordinates and an insight", () => {
+  const merchants = [merchant("with_coords"), merchant("no_coords", false)];
   const candidates = selectCandidateMerchants(merchants, merchants.map((item) => insight(item.id)), context);
-  assert.equal(candidates.find((candidate) => candidate.merchantId === "partner")?.considered, true);
-  assert.equal(candidates.find((candidate) => candidate.merchantId === "discovered_only")?.considered, false);
-  assert.equal(candidates.find((candidate) => candidate.merchantId === "demo_partner")?.considered, false);
-});
-
-test("candidate selection gates demo_partner by demo flags", () => {
-  const demo = merchant("demo_partner");
-  process.env.DEMO_MODE = "false";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "false";
-  assert.equal(selectCandidateMerchants([demo], [insight(demo.id)], context)[0]?.considered, false);
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
-  assert.equal(selectCandidateMerchants([demo], [insight(demo.id)], context)[0]?.considered, true);
+  assert.equal(candidates.find((candidate) => candidate.merchantId === "with_coords")?.considered, true);
+  assert.equal(candidates.find((candidate) => candidate.merchantId === "no_coords")?.considered, false);
 });

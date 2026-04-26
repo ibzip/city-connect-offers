@@ -15,6 +15,7 @@ import type {
   SupportedMerchantCategory,
 } from "@city-wallet/contracts";
 import { Badge, Button, EventLog, ExplainabilityPanel, JsonPanel, MerchantPulseCard, Section } from "@city-wallet/ui";
+import { X } from "lucide-react";
 import { apiGet, apiPost } from "./api";
 
 const categoryOptions: SupportedMerchantCategory[] = [
@@ -31,7 +32,7 @@ const categoryOptions: SupportedMerchantCategory[] = [
   "clothing",
   "grocery",
 ];
-const participationStatusOptions: MerchantParticipationStatus[] = ["partner", "demo_partner", "discovered_only", "discovered_only_without_coordinates"];
+const participationStatusOptions: MerchantParticipationStatus[] = ["partner"];
 const offerTypeOptions: OfferType[] = ["cashback", "discount", "priority_pickup", "bundle_unlock"];
 const sourceOptions = ["seeded", "google_places", "osm_overpass", "overpass", "tavily", "manual", "db"] as const;
 const defaultCategoryCaps: Record<SupportedMerchantCategory, string> = {
@@ -212,7 +213,6 @@ export function DashboardApp() {
         maxTilesPerRun: Number(zoneForm.maxTilesPerRun || 25),
         categories: selectedCategories,
         categoryCaps: Object.fromEntries(selectedCategories.map((category) => [category, Number(categoryCaps[category] || defaultCategoryCaps[category])])),
-        autoDemoOnboard: true,
         forceRefresh: zoneForm.forceRefresh,
         previewOnly,
         coordinateBox: zoneMode === "coordinate_box"
@@ -227,6 +227,9 @@ export function DashboardApp() {
       const result = await apiPost<ActivateCommerceZoneResult>("/api/commerce-zones/activate", body);
       setImportResult(result);
       await load();
+      if (!previewOnly && result.importRun) {
+        setImportDialogOpen(false);
+      }
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not reach City Wallet API.");
       console.error(error);
@@ -359,7 +362,6 @@ export function DashboardApp() {
           <p className="mt-1 text-sm text-ink-muted">Business-state snapshots, offer impact, redemption log, and explainability from the real product flow.</p>
         </div>
         <div className="flex flex-wrap gap-3">
-          <Button variant="secondary" onClick={() => setImportDialogOpen(true)}>Import merchants</Button>
           <Button onClick={refresh} disabled={busy}>{busy ? "Refreshing..." : "Refresh insights"}</Button>
         </div>
       </div>
@@ -371,6 +373,13 @@ export function DashboardApp() {
         </div>
       ) : null}
 
+      <div className="mb-6 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        <div className="mb-1 font-semibold">Synthetic data notice</div>
+        <p>
+          Imported merchants are treated as real partners in the recommendation pipeline, but their products, rules, transactions, and redemption signals are generated synthetically for the MVP. Real partner integrations are not yet wired.
+        </p>
+      </div>
+
       <div className="mb-6 rounded-2xl border border-black/10 bg-paper p-5">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
@@ -378,7 +387,6 @@ export function DashboardApp() {
             <h2 className="font-serif text-2xl">Stored city supply</h2>
             <p className="mt-1 text-sm text-ink-muted">City imports are managed from the top-banner workflow. The dashboard stays focused on stored merchants, insights, and analytics.</p>
           </div>
-          <Button onClick={() => setImportDialogOpen(true)}>Import merchants</Button>
         </div>
         <div className="mt-4 grid gap-3 text-sm md:grid-cols-3">
           <div className="rounded-xl border border-black/10 bg-white/70 p-3">
@@ -397,158 +405,166 @@ export function DashboardApp() {
       </div>
 
       {importDialogOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
-          <div className="max-h-[90vh] w-[min(1120px,100%)] overflow-y-auto rounded-2xl border border-black/10 bg-paper p-5 shadow-2xl">
-            <div className="mb-4 flex justify-end">
-              <Button variant="secondary" onClick={() => setImportDialogOpen(false)}>Close</Button>
-            </div>
-            <div>
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="mb-2"><Badge tone="blue">activated zones / city import</Badge></div>
-            <h2 className="font-serif text-2xl">One-time merchant import</h2>
-            <p className="mt-1 text-sm text-ink-muted">Activate a city or area, import merchants once, then match wallet users against stored DB merchants.</p>
-          </div>
-          <Button variant="secondary" onClick={useLatestWalletLocation} disabled={!metrics?.currentContext?.userLocation || importBusy}>Use latest wallet location</Button>
-        </div>
-
-        <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
-          <div className="space-y-2 text-sm">
-            {(["city", "center_radius", "coordinate_box"] as const).map((mode) => (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="import-merchants-title"
+        >
+          <div className="flex max-h-[90vh] w-[min(1120px,100%)] flex-col rounded-2xl border border-black/10 bg-paper shadow-2xl">
+            <header className="flex items-start justify-between gap-3 border-b border-black/10 px-5 py-4">
+              <div>
+                <div className="mb-2"><Badge tone="blue">activated zones / city import</Badge></div>
+                <h2 id="import-merchants-title" className="font-serif text-2xl">Import city merchants</h2>
+                <p className="mt-1 text-sm text-ink-muted">Activate a city or area, import merchants once, then match wallet users against stored DB merchants.</p>
+              </div>
               <button
-                key={mode}
                 type="button"
-                onClick={() => setZoneMode(mode)}
-                className={zoneMode === mode ? "w-full rounded-lg border border-teal bg-teal/10 px-3 py-2 text-left font-semibold text-teal" : "w-full rounded-lg border border-black/10 bg-white/60 px-3 py-2 text-left text-ink-muted"}
+                aria-label="Close import dialog"
+                onClick={() => setImportDialogOpen(false)}
+                className="rounded-full p-2 text-ink-muted transition-colors hover:bg-black/5 hover:text-ink"
               >
-                {mode === "city" ? "City + country" : mode === "center_radius" ? "Center + radius" : "Coordinate box"}
+                <X size={18} />
               </button>
-            ))}
-          </div>
+            </header>
 
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="text-xs uppercase tracking-wider text-ink-muted">City
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" value={zoneForm.city} onChange={(event) => setZoneForm({ ...zoneForm, city: event.target.value, centerLat: "", centerLng: "" })} />
-              {citySuggesting ? <p className="mt-1 text-[11px] normal-case tracking-normal text-ink-muted">Looking up city options...</p> : null}
-              {citySuggestions.length > 0 ? (
-                <div className="mt-2 space-y-2 normal-case tracking-normal">
-                  {citySuggestions.map((suggestion) => (
+            <div className="flex-1 overflow-y-auto px-5 py-4">
+              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-ink-muted">Choose how to define the zone, set merchant target and category caps, then preview or import.</p>
+                <Button variant="secondary" onClick={useLatestWalletLocation} disabled={!metrics?.currentContext?.userLocation || importBusy}>Use latest wallet location</Button>
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[220px_1fr]">
+                <div className="space-y-2 text-sm">
+                  {(["city", "center_radius", "coordinate_box"] as const).map((mode) => (
                     <button
-                      key={`${suggestion.city}-${suggestion.country}-${suggestion.centerLat}-${suggestion.centerLng}`}
+                      key={mode}
                       type="button"
-                      onClick={() => selectCitySuggestion(suggestion)}
-                      className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-left text-sm text-ink shadow-sm hover:border-teal hover:bg-teal/5"
+                      onClick={() => setZoneMode(mode)}
+                      className={zoneMode === mode ? "w-full rounded-lg border border-teal bg-teal/10 px-3 py-2 text-left font-semibold text-teal" : "w-full rounded-lg border border-black/10 bg-white/60 px-3 py-2 text-left text-ink-muted"}
                     >
-                      <span className="block font-semibold">{suggestion.city}, {suggestion.country}</span>
-                      <span className="block text-xs text-ink-muted">{suggestion.label}</span>
-                      <span className="block text-[11px] text-ink-muted">{suggestion.centerLat.toFixed(4)}, {suggestion.centerLng.toFixed(4)} · Nominatim</span>
+                      {mode === "city" ? "City + country" : mode === "center_radius" ? "Center + radius" : "Coordinate box"}
                     </button>
                   ))}
                 </div>
-              ) : null}
-            </div>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Country
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" value={zoneForm.country} onChange={(event) => setZoneForm({ ...zoneForm, country: event.target.value, centerLat: "", centerLng: "" })} />
-            </label>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Radius meters
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.radiusMeters} onChange={(event) => setZoneForm({ ...zoneForm, radiusMeters: event.target.value })} />
-              <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Area around the city or center point to import from. Requests above the hard cap are clamped.</span>
-            </label>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Center latitude
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.centerLat} onChange={(event) => setZoneForm({ ...zoneForm, centerLat: event.target.value })} />
-            </label>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Center longitude
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.centerLng} onChange={(event) => setZoneForm({ ...zoneForm, centerLng: event.target.value })} />
-            </label>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Max merchants
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.maxImportedMerchants} onChange={(event) => setZoneForm({ ...zoneForm, maxImportedMerchants: event.target.value })} />
-              <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Target total stored merchants for this zone. Raising it imports more while skipping already stored merchants.</span>
-            </label>
-            <label className="text-xs uppercase tracking-wider text-ink-muted">Checkpoint chunks
-              <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.maxTilesPerRun} onChange={(event) => setZoneForm({ ...zoneForm, maxTilesPerRun: event.target.value })} />
-              <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Provider work batch size before progress is saved. It is not the merchant target.</span>
-            </label>
-            {zoneMode === "coordinate_box" ? (
-              <>
-                {(["north", "south", "east", "west"] as const).map((field) => (
-                  <label key={field} className="text-xs uppercase tracking-wider text-ink-muted">{field}
-                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm[field]} onChange={(event) => setZoneForm({ ...zoneForm, [field]: event.target.value })} />
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  <div className="text-xs uppercase tracking-wider text-ink-muted">City
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" value={zoneForm.city} onChange={(event) => setZoneForm({ ...zoneForm, city: event.target.value, centerLat: "", centerLng: "" })} />
+                    {citySuggesting ? <p className="mt-1 text-[11px] normal-case tracking-normal text-ink-muted">Looking up city options...</p> : null}
+                    {citySuggestions.length > 0 ? (
+                      <div className="mt-2 space-y-2 normal-case tracking-normal">
+                        {citySuggestions.map((suggestion) => (
+                          <button
+                            key={`${suggestion.city}-${suggestion.country}-${suggestion.centerLat}-${suggestion.centerLng}`}
+                            type="button"
+                            onClick={() => selectCitySuggestion(suggestion)}
+                            className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-left text-sm text-ink shadow-sm hover:border-teal hover:bg-teal/5"
+                          >
+                            <span className="block font-semibold">{suggestion.city}, {suggestion.country}</span>
+                            <span className="block text-xs text-ink-muted">{suggestion.label}</span>
+                            <span className="block text-[11px] text-ink-muted">{suggestion.centerLat.toFixed(4)}, {suggestion.centerLng.toFixed(4)} · Nominatim</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Country
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" value={zoneForm.country} onChange={(event) => setZoneForm({ ...zoneForm, country: event.target.value, centerLat: "", centerLng: "" })} />
+                  </label>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Radius meters
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.radiusMeters} onChange={(event) => setZoneForm({ ...zoneForm, radiusMeters: event.target.value })} />
+                    <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Area around the city or center point to import from. Requests above the hard cap are clamped.</span>
+                  </label>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Center latitude
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.centerLat} onChange={(event) => setZoneForm({ ...zoneForm, centerLat: event.target.value })} />
+                  </label>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Center longitude
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.centerLng} onChange={(event) => setZoneForm({ ...zoneForm, centerLng: event.target.value })} />
+                  </label>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Max merchants
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.maxImportedMerchants} onChange={(event) => setZoneForm({ ...zoneForm, maxImportedMerchants: event.target.value })} />
+                    <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Target total stored merchants for this zone. Raising it imports more while skipping already stored merchants. Per-category caps are auto-boosted if their sum is below this target.</span>
+                  </label>
+                  <label className="text-xs uppercase tracking-wider text-ink-muted">Checkpoint chunks
+                    <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm.maxTilesPerRun} onChange={(event) => setZoneForm({ ...zoneForm, maxTilesPerRun: event.target.value })} />
+                    <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Provider work batch size before progress is saved. It is not the merchant target.</span>
+                  </label>
+                  {zoneMode === "coordinate_box" ? (
+                    <>
+                      {(["north", "south", "east", "west"] as const).map((field) => (
+                        <label key={field} className="text-xs uppercase tracking-wider text-ink-muted">{field}
+                          <input className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink" type="number" value={zoneForm[field]} onChange={(event) => setZoneForm({ ...zoneForm, [field]: event.target.value })} />
+                        </label>
+                      ))}
+                    </>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mt-4 flex flex-wrap gap-2">
+                {categoryOptions.map((category) => (
+                  <button
+                    key={category}
+                    type="button"
+                    onClick={() => toggleCategory(category)}
+                    className={selectedCategories.includes(category) ? "rounded-full border border-teal bg-teal/10 px-3 py-1 text-xs font-semibold text-teal" : "rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-ink-muted"}
+                  >
+                    {category}
+                  </button>
+                ))}
+              </div>
+
+              <div className="mt-4 grid gap-3 md:grid-cols-4 lg:grid-cols-6">
+                {selectedCategories.map((category) => (
+                  <label key={category} className="text-xs uppercase tracking-wider text-ink-muted">{category} cap
+                    <input
+                      className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink"
+                      type="number"
+                      value={categoryCaps[category]}
+                      onChange={(event) => setCategoryCaps({ ...categoryCaps, [category]: event.target.value })}
+                    />
+                    <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Maximum stored merchants for this category.</span>
                   </label>
                 ))}
-              </>
-            ) : null}
-          </div>
-        </div>
+              </div>
 
-        <div className="mt-4 flex flex-wrap gap-2">
-          {categoryOptions.map((category) => (
-            <button
-              key={category}
-              type="button"
-              onClick={() => toggleCategory(category)}
-              className={selectedCategories.includes(category) ? "rounded-full border border-teal bg-teal/10 px-3 py-1 text-xs font-semibold text-teal" : "rounded-full border border-black/10 bg-white px-3 py-1 text-xs text-ink-muted"}
-            >
-              {category}
-            </button>
-          ))}
-        </div>
+              <label className="mt-4 flex max-w-2xl items-start gap-3 rounded-xl border border-black/10 bg-white/70 p-3 text-sm text-ink">
+                <input
+                  className="mt-1"
+                  type="checkbox"
+                  checked={zoneForm.forceRefresh}
+                  onChange={(event) => setZoneForm({ ...zoneForm, forceRefresh: event.target.checked })}
+                />
+                <span>
+                  <span className="block font-semibold">Force new import run</span>
+                  <span className="block text-xs text-ink-muted">
+                    Off reuses stored city merchants or resumes a paused import. On starts a new run; fresh provider response caches may still be used for cost control.
+                  </span>
+                </span>
+              </label>
 
-        <div className="mt-4 grid gap-3 md:grid-cols-4 lg:grid-cols-6">
-          {selectedCategories.map((category) => (
-            <label key={category} className="text-xs uppercase tracking-wider text-ink-muted">{category} cap
-              <input
-                className="mt-1 w-full rounded-lg border bg-white px-3 py-2 text-sm normal-case tracking-normal text-ink"
-                type="number"
-                value={categoryCaps[category]}
-                onChange={(event) => setCategoryCaps({ ...categoryCaps, [category]: event.target.value })}
-              />
-              <span className="mt-1 block text-[11px] normal-case tracking-normal text-ink-muted">Maximum stored merchants for this category.</span>
-            </label>
-          ))}
-        </div>
-
-        <label className="mt-4 flex max-w-2xl items-start gap-3 rounded-xl border border-black/10 bg-white/70 p-3 text-sm text-ink">
-          <input
-            className="mt-1"
-            type="checkbox"
-            checked={zoneForm.forceRefresh}
-            onChange={(event) => setZoneForm({ ...zoneForm, forceRefresh: event.target.checked })}
-          />
-          <span>
-            <span className="block font-semibold">Force new import run</span>
-            <span className="block text-xs text-ink-muted">
-              Off reuses stored city merchants or resumes a paused import. On starts a new run; fresh provider response caches may still be used for cost control.
-            </span>
-          </span>
-        </label>
-
-        <div className="mt-4 flex flex-wrap gap-3">
-          <Button variant="secondary" onClick={() => activateCity(true)} disabled={importBusy}>{importBusy ? "Working..." : "Preview import"}</Button>
-          <Button onClick={() => activateCity(false)} disabled={importBusy}>{importBusy ? "Importing..." : "Activate + import"}</Button>
-        </div>
-
-        {importResult ? (
-          <div className="mt-4 grid gap-3 text-sm lg:grid-cols-2">
-            <div className="rounded-xl border border-black/10 bg-white/70 p-4">
-              <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">Import preview</div>
-              <p>{importResult.zone.name} · {importResult.preview.provider} · {importResult.preview.radiusMeters}m</p>
-              <p className="mt-1 font-semibold text-teal">Planned action: {importResult.preview.plannedImportAction.replace(/_/g, " ")}</p>
-              <p className="mt-1 text-ink-muted">{importResult.preview.estimatedTiles} estimated tile(s) · {importResult.preview.estimatedRequestCount} estimated provider request(s)</p>
-              <p className="mt-1 text-ink-muted">{importResult.preview.maxImportedMerchants} target merchants · {importResult.preview.maxTilesPerRun} checkpoint chunks</p>
-              <p className="mt-1 text-ink-muted">{importResult.preview.existingStoredMerchantCount} stored merchant(s) already in this city zone</p>
-              {importResult.preview.settingsChangeSummary.map((line, index) => <p key={`${line}-${index}`} className="mt-1 text-ink-muted">{line}</p>)}
-              {importResult.preview.cacheReuseAvailable ? <p className="mt-1 font-semibold text-teal">Stored city merchant cache available</p> : null}
-              {importResult.preview.maxProviderRequests ? <p className="mt-1 text-ink-muted">{importResult.preview.maxProviderRequests} max provider request(s) per import</p> : null}
-              {importResult.preview.fieldMask ? <p className="mt-1 break-words font-mono text-[11px] text-ink-muted">Field mask: {importResult.preview.fieldMask}</p> : null}
-              <p className="mt-1 text-ink-muted">Place Details: {importResult.preview.placeDetailsDisabled ? "disabled for cost control" : "enabled"}</p>
-              <p className="mt-1 text-ink-muted">Demo onboarding: {importResult.preview.demoAutoOnboardingEnabled ? "enabled" : "off or env-disabled"}</p>
-              {uniqueStrings([...importResult.preview.providerWarnings, ...importResult.warnings]).map((warning) => <p key={warning} className="mt-1 text-amber-700">{warning}</p>)}
+              {importResult ? (
+                <div className="mt-5">
+                  <ImportResultPanel result={importResult} variant="inline" onDismiss={() => setImportResult(null)} />
+                </div>
+              ) : null}
             </div>
-            <JsonPanel title="Import API Result" data={importResult} />
+
+            <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-black/10 bg-paper px-5 py-4">
+              <Button variant="ghost" onClick={() => setImportDialogOpen(false)}>Cancel</Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="secondary" onClick={() => activateCity(true)} disabled={importBusy}>{importBusy ? "Working..." : "Preview import"}</Button>
+                <Button onClick={() => activateCity(false)} disabled={importBusy}>{importBusy ? "Importing..." : "Activate + import"}</Button>
+              </div>
+            </footer>
           </div>
-        ) : null}
-            </div>
-          </div>
+        </div>
+      ) : null}
+
+      {importResult && !importDialogOpen ? (
+        <div className="mb-6">
+          <ImportResultPanel result={importResult} variant="dashboard" onDismiss={() => setImportResult(null)} />
         </div>
       ) : null}
 
@@ -579,7 +595,7 @@ export function DashboardApp() {
                   <div className="font-semibold">{run.id}</div>
                   <Badge tone={run.status === "completed" ? "green" : run.status === "paused" ? "orange" : run.status.includes("failed") ? "red" : "blue"}>{run.status}</Badge>
                 </div>
-                <p className="text-ink-muted">{run.importedCount} / {run.maxImportedMerchants} imported · {run.demoPartnerCount} demo partners · {run.failedCount} failed chunks</p>
+                <p className="text-ink-muted">{run.importedCount} / {run.maxImportedMerchants} imported · {run.failedCount} failed chunks</p>
                 {importStopMessage(run) ? <p className="mt-1 text-ink-muted">Stop reason: {importStopMessage(run)}</p> : null}
                 {typeof importRunStat(run, "googlePlacesRequests") === "number" ? <p className="mt-1 text-ink-muted">{String(importRunStat(run, "googlePlacesRequests"))} Google Places request(s) used</p> : null}
                 {typeof importRunStat(run, "remainingJobs") === "number" ? <p className="mt-1 text-ink-muted">{String(importRunStat(run, "remainingJobs"))} import chunk(s) remaining</p> : null}
@@ -675,7 +691,7 @@ export function DashboardApp() {
       </div>
 
       {merchantDraft ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 px-4 py-6 backdrop-blur-sm">
           <div className="max-h-[90vh] w-[min(1120px,100%)] overflow-y-auto rounded-2xl border border-black/10 bg-paper p-5 shadow-2xl">
           <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
             <div>
@@ -685,7 +701,7 @@ export function DashboardApp() {
             </div>
             <div className="flex flex-wrap gap-2">
               {selectedMetric?.insight ? <Badge tone="purple">urgency {selectedMetric.insight.urgencyScore}</Badge> : null}
-              <Badge tone={merchantDraft.participationStatus === "demo_partner" ? "orange" : "green"}>{merchantDraft.participationStatus}</Badge>
+              <Badge tone="green">{merchantDraft.participationStatus}</Badge>
               {merchantDraft.source ? <Badge>{merchantDraft.source}</Badge> : null}
               <Button variant="secondary" onClick={() => { setMerchantDraft(null); setSelectedMerchantId(""); setRuleCompileResult(null); }}>Close</Button>
             </div>
@@ -821,7 +837,6 @@ export function DashboardApp() {
             </div>
           </div>
 
-          {merchantDraft.demoDisclosure ? <p className="mt-4 rounded-xl bg-orange-50 p-3 text-xs text-orange-900">{merchantDraft.demoDisclosure}</p> : null}
           <div className="mt-5 flex flex-wrap items-center gap-3">
             <Button onClick={saveMerchantDraft} disabled={merchantSaveBusy}>{merchantSaveBusy ? "Saving..." : "Save merchant"}</Button>
             <Button variant="secondary" onClick={() => selectedMetric && selectMerchant(selectedMetric.merchant)} disabled={!selectedMetric || merchantSaveBusy}>Reset draft</Button>
@@ -849,13 +864,7 @@ export function DashboardApp() {
                   <Badge tone={metric.insight?.businessState === "normal" ? "green" : "purple"}>{metric.insight?.businessState ?? "no insight"}</Badge>
                 </div>
                 <div className="mb-3 flex flex-wrap gap-2">
-                  <Badge tone={metric.merchant.participationStatus === "demo_partner" ? "orange" : metric.merchant.participationStatus?.startsWith("discovered") ? "blue" : "green"}>
-                    {metric.merchant.participationStatus === "demo_partner" && metric.merchant.source === "google_places"
-                      ? "Demo-onboarded from Google Places discovery"
-                      : metric.merchant.participationStatus === "demo_partner" && metric.merchant.source === "osm_overpass"
-                      ? "Demo-onboarded from OSM discovery"
-                      : metric.merchant.participationStatus === "demo_partner" ? "Demo-onboarded from discovery" : metric.merchant.participationStatus ?? "partner"}
-                  </Badge>
+                  <Badge tone="green">{metric.merchant.participationStatus ?? "partner"}</Badge>
                   {metric.merchant.source ? <Badge>{metric.merchant.source}</Badge> : null}
                   {metric.calculatedDistanceMeters !== undefined ? <Badge tone="green">{metric.calculatedDistanceMeters}m from current context</Badge> : null}
                 </div>
@@ -880,7 +889,7 @@ export function DashboardApp() {
                       <p className="mt-1 text-ink-muted">Compiled free-form rules: {metric.merchant.rule.compiledFreeformRules.summary}</p>
                     ) : null}
                     {(metric.merchant.syntheticFields ?? []).length > 0 ? (
-                      <p className="mt-1 text-ink-muted">Synthetic/demo fields: {(metric.merchant.syntheticFields ?? []).join(", ")}.</p>
+                      <p className="mt-1 text-ink-muted">Synthetic fields: {(metric.merchant.syntheticFields ?? []).join(", ")}.</p>
                     ) : null}
                   </div>
                   <div>
@@ -891,7 +900,6 @@ export function DashboardApp() {
                         ? `${metric.merchant.latitude.toFixed(5)}, ${metric.merchant.longitude.toFixed(5)}`
                         : "missing; excluded from offers"}
                     </p>
-                    {metric.merchant.demoDisclosure ? <p className="mt-1 text-ink-muted">{metric.merchant.demoDisclosure}</p> : null}
                   </div>
                 </div>
               </div>
@@ -915,6 +923,55 @@ export function DashboardApp() {
 
 function cloneMerchant(merchant: Merchant): Merchant {
   return JSON.parse(JSON.stringify(merchant)) as Merchant;
+}
+
+function ImportResultPanel({
+  result,
+  variant,
+  onDismiss,
+}: {
+  result: ActivateCommerceZoneResult;
+  variant: "inline" | "dashboard";
+  onDismiss: () => void;
+}) {
+  const isPreview = !result.importRun;
+  const tone: "blue" | "green" | "orange" = isPreview ? "orange" : "green";
+  const heading = isPreview ? "Import preview" : "Import complete";
+  const subtitle = isPreview
+    ? "Nothing was imported yet. Adjust settings or run Activate + import."
+    : `${result.importRun?.importedCount ?? 0} merchant(s) recorded for ${result.zone.name}.`;
+  const containerClasses = variant === "dashboard"
+    ? "rounded-2xl border border-black/10 bg-paper p-5"
+    : "rounded-2xl border border-black/10 bg-white/70 p-4";
+  return (
+    <div className={containerClasses}>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="mb-2"><Badge tone={tone}>{heading}</Badge></div>
+          <h3 className="font-serif text-xl">{result.zone.name}</h3>
+          <p className="mt-1 text-sm text-ink-muted">{subtitle}</p>
+        </div>
+        <Button variant="ghost" onClick={onDismiss}>Dismiss</Button>
+      </div>
+      <div className="grid gap-3 text-sm lg:grid-cols-2">
+        <div className="rounded-xl border border-black/10 bg-white/70 p-4">
+          <div className="mb-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">Plan</div>
+          <p>{result.preview.provider} · {result.preview.radiusMeters}m</p>
+          <p className="mt-1 font-semibold text-teal">Planned action: {result.preview.plannedImportAction.replace(/_/g, " ")}</p>
+          <p className="mt-1 text-ink-muted">{result.preview.estimatedTiles} estimated tile(s) · {result.preview.estimatedRequestCount} estimated provider request(s)</p>
+          <p className="mt-1 text-ink-muted">{result.preview.maxImportedMerchants} target merchants · {result.preview.maxTilesPerRun} checkpoint chunks</p>
+          <p className="mt-1 text-ink-muted">{result.preview.existingStoredMerchantCount} stored merchant(s) already in this city zone</p>
+          {result.preview.settingsChangeSummary.map((line, index) => <p key={`${line}-${index}`} className="mt-1 text-ink-muted">{line}</p>)}
+          {result.preview.cacheReuseAvailable ? <p className="mt-1 font-semibold text-teal">Stored city merchant cache available</p> : null}
+          {result.preview.maxProviderRequests ? <p className="mt-1 text-ink-muted">{result.preview.maxProviderRequests} max provider request(s) per import</p> : null}
+          {result.preview.fieldMask ? <p className="mt-1 break-words font-mono text-[11px] text-ink-muted">Field mask: {result.preview.fieldMask}</p> : null}
+          <p className="mt-1 text-ink-muted">Place Details: {result.preview.placeDetailsDisabled ? "disabled for cost control" : "enabled"}</p>
+          {uniqueStrings([...result.preview.providerWarnings, ...result.warnings]).map((warning) => <p key={warning} className="mt-1 text-amber-700">{warning}</p>)}
+        </div>
+        <JsonPanel title="Import API Result" data={result} />
+      </div>
+    </div>
+  );
 }
 
 function defaultMerchantRule(merchant: Merchant): MerchantRule {

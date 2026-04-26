@@ -257,7 +257,6 @@ export async function runOptionalMerchantDiscovery(input: {
 
   const discovered: Merchant[] = [];
   const merged = dedupeBusinesses([...poiResults, ...tavilyResults]).slice(0, 12);
-  let demoPartnerCount = 0;
   for (const business of merged) {
     let coordinates = business.latitude !== undefined && business.longitude !== undefined
       ? { latitude: business.latitude, longitude: business.longitude }
@@ -266,21 +265,16 @@ export async function runOptionalMerchantDiscovery(input: {
       const query = [business.address, business.name, activeZone?.city].filter(Boolean).join(", ");
       coordinates = await providers.geocoding.geocode(query, { budget: input.budget, cache: geocodeCache });
     }
+    if (!coordinates) continue;
 
     const baseMerchant = discoveredBusinessToMerchant({
       business,
       context: input.context,
       coordinates,
     });
-    const canDemoOnboard = shouldCreateDemoPartners() && coordinates && demoPartnerCount < 3;
-    const merchant = canDemoOnboard
-      ? createDemoPartnerFromDiscoveredMerchant(baseMerchant)
-      : baseMerchant;
-    if (merchant.participationStatus === "demo_partner") demoPartnerCount += 1;
+    const merchant = enrichImportedMerchantWithSyntheticData(baseMerchant);
     await input.repository.saveMerchant(merchant);
-    if (merchant.participationStatus === "demo_partner") {
-      await input.repository.savePaymentDensitySignal(generateDemoPaymentDensity(merchant));
-    }
+    await input.repository.savePaymentDensitySignal(generateSyntheticPaymentDensity(merchant));
     discovered.push(merchant);
   }
 
@@ -318,7 +312,6 @@ export async function activateCommerceZoneAndImport(input: {
       maxTilesPerRun: basePreview.maxTilesPerRun,
       categories: basePreview.selectedCategories,
       categoryCaps: basePreview.categoryCaps,
-      autoDemoOnboard: input.request.autoDemoOnboard,
     },
     isActive: true,
     triggerPolicyIds: ["trg_wallet_opened", "trg_user_entered_zone", "trg_declared_context_changed"],
@@ -385,7 +378,6 @@ export async function activateCommerceZoneAndImport(input: {
       maxImportedMerchants: preview.maxImportedMerchants,
       maxTilesPerRun: preview.maxTilesPerRun,
       importedCount: existingMerchants.length,
-      demoPartnerCount: existingMerchants.filter((merchant) => merchant.participationStatus === "demo_partner").length,
       failedCount: 0,
       continuationCursor: null,
       warnings: preview.warnings,
@@ -429,7 +421,6 @@ export async function activateCommerceZoneAndImport(input: {
     maxImportedMerchants: preview.maxImportedMerchants,
     maxTilesPerRun: preview.maxTilesPerRun,
     importedCount: settingsAnalysis.startingImportedCount,
-    demoPartnerCount: settingsAnalysis.startingDemoPartnerCount,
     failedCount: 0,
     continuationCursor: "0",
     warnings: preview.warnings,
@@ -467,14 +458,12 @@ function analyzeImportSettings(input: {
   pausedRun?: MerchantImportRun | null;
   forceRefresh: boolean;
 }) {
-  const existingDemoPartners = input.existingMerchants.filter((merchant) => merchant.participationStatus === "demo_partner").length;
   if (input.forceRefresh || input.existingMerchants.length === 0) {
     return {
       action: "new_import" as const,
       summary: input.forceRefresh ? ["Force fresh provider search requested; stored merchants are still skipped by dedupe."] : [],
       warnings: [] as string[],
       startingImportedCount: 0,
-      startingDemoPartnerCount: 0,
     };
   }
 
@@ -541,7 +530,6 @@ function analyzeImportSettings(input: {
       summary,
       warnings,
       startingImportedCount: Math.min(input.existingMerchants.length, input.preview.maxImportedMerchants),
-      startingDemoPartnerCount: existingDemoPartners,
     };
   }
   if (input.pausedRun) {
@@ -550,7 +538,6 @@ function analyzeImportSettings(input: {
       summary: summary.length ? summary : ["A paused import exists and will be resumed."],
       warnings,
       startingImportedCount: input.existingMerchants.length,
-      startingDemoPartnerCount: existingDemoPartners,
     };
   }
   if (decreased) {
@@ -560,7 +547,6 @@ function analyzeImportSettings(input: {
       summary,
       warnings,
       startingImportedCount: input.existingMerchants.length,
-      startingDemoPartnerCount: existingDemoPartners,
     };
   }
   return {
@@ -568,7 +554,6 @@ function analyzeImportSettings(input: {
     summary: summary.length ? summary : ["Stored merchants already satisfy the requested import settings; provider search will be skipped."],
     warnings,
     startingImportedCount: input.existingMerchants.length,
-    startingDemoPartnerCount: existingDemoPartners,
   };
 }
 
@@ -709,7 +694,6 @@ export async function continueMerchantImportRun(input: {
   const importedMerchants: string[] = [];
   const errors: Array<Record<string, unknown>> = retryProviderHeaderFailures ? [] : previousErrors;
   let failedCount = retryProviderHeaderFailures ? 0 : started.failedCount;
-  let demoPartnerCount = retryProviderHeaderFailures ? 0 : started.demoPartnerCount;
   let importedCount = retryProviderHeaderFailures ? 0 : started.importedCount;
   let checkpointProcessed = 0;
   let consecutiveErrors = 0;
@@ -732,7 +716,6 @@ export async function continueMerchantImportRun(input: {
     await input.repository.updateMerchantImportRun(run.id, {
       status,
       importedCount,
-      demoPartnerCount,
       failedCount,
       continuationCursor: cursor < jobs.length ? String(cursor) : null,
       errorJson: errors.length > 0 ? { errors } : null,
@@ -804,18 +787,9 @@ export async function continueMerchantImportRun(input: {
         context: contextFromZone(zone, business),
         coordinates: { latitude: business.latitude, longitude: business.longitude },
       });
-      const merchant = shouldCreateDemoPartners() && shouldAutoDemoOnboard(zone)
-        ? createDemoPartnerFromDiscoveredMerchant({
-            ...baseMerchant,
-            participationStatus: "demo_partner",
-            demoDisclosure: `${demoDiscoverySourceLabel(baseMerchant.source)}. Products, rules, transaction data, offers, and redemption are simulated for the hackathon MVP.`,
-          })
-        : baseMerchant;
+      const merchant = enrichImportedMerchantWithSyntheticData(baseMerchant);
       const saved = await input.repository.saveMerchant(merchant);
-      if (saved.participationStatus === "demo_partner") {
-        await input.repository.savePaymentDensitySignal(generateDemoPaymentDensity(saved));
-        demoPartnerCount += 1;
-      }
+      await input.repository.savePaymentDensitySignal(generateSyntheticPaymentDensity(saved));
       for (const key of keys) seenKeys.add(key);
       importedCount += 1;
       categoryCounts[saved.category as SupportedMerchantCategory] = (categoryCounts[saved.category as SupportedMerchantCategory] ?? 0) + 1;
@@ -851,7 +825,6 @@ export async function continueMerchantImportRun(input: {
   const nextRun = await input.repository.updateMerchantImportRun(run.id, {
     status,
     importedCount,
-    demoPartnerCount,
     failedCount,
     continuationCursor: hasRemaining ? String(index) : null,
     errorJson: errors.length > 0 ? { errors } : null,
@@ -889,10 +862,23 @@ export function buildImportPreview(request: ActivateCommerceZoneRequest, additio
   const estimatedTiles = estimateTileCount(radiusMeters);
   const maxProviderRequests = provider === "google_places" ? getGooglePlacesMaxRequestsPerImport() : undefined;
   const estimatedRequestCount = Math.min(estimatedTiles * selectedCategories.length, maxProviderRequests ?? estimatedTiles * selectedCategories.length);
-  const categoryCaps = Object.fromEntries(selectedCategories.map((category) => [
+  const categoryCaps: Record<string, number> = Object.fromEntries(selectedCategories.map((category) => [
     category,
     Math.min(request.categoryCaps?.[category] ?? discoveryConfig.defaultCategoryCaps[category], maxImportedMerchants),
   ]));
+  if (selectedCategories.length > 0) {
+    const sumCaps = selectedCategories.reduce((sum, category) => sum + (categoryCaps[category] ?? 0), 0);
+    if (sumCaps < maxImportedMerchants) {
+      const headroom = maxImportedMerchants - sumCaps;
+      const bonus = Math.ceil(headroom / selectedCategories.length);
+      for (const category of selectedCategories) {
+        categoryCaps[category] = Math.min((categoryCaps[category] ?? 0) + bonus, maxImportedMerchants);
+      }
+      warnings.push(
+        `Total target ${maxImportedMerchants} exceeds the sum of category caps ${sumCaps}; distributing ~${bonus} extra slot(s) per category so the total wins.`,
+      );
+    }
+  }
   return {
     provider,
     radiusMeters,
@@ -911,23 +897,21 @@ export function buildImportPreview(request: ActivateCommerceZoneRequest, additio
     cacheReuseAvailable: false,
     plannedImportAction: "new_import" as const,
     settingsChangeSummary: [],
-    demoAutoOnboardingEnabled: shouldCreateDemoPartners() && request.autoDemoOnboard !== false,
     liveWalletDiscoveryFallbackEnabled: isWalletLiveDiscoveryFallbackEnabled(),
   };
 }
 
-export function createDemoPartnerFromDiscoveredMerchant(merchant: Merchant): Merchant {
+export function enrichImportedMerchantWithSyntheticData(merchant: Merchant): Merchant {
   const products = generateProducts(merchant);
   const goals = generateGoals(merchant);
   const rule = generateRules(merchant, products);
   return {
     ...merchant,
-    participationStatus: "demo_partner",
+    participationStatus: "partner",
     products,
     goals,
     rule,
     syntheticFields: ["products", "goals", "rules", "transactions", "redemption"],
-    demoDisclosure: merchant.demoDisclosure ?? "Demo-onboarded from discovery. Products, rules, transaction data, offers, and redemption are simulated for the hackathon MVP.",
   };
 }
 
@@ -1135,12 +1119,6 @@ function shouldRetryImportFromStart(run: MerchantImportRun, errors: Array<Record
     run.failedCount > 0 &&
     errors.length > 0 &&
     errors.every((error) => typeof error.error === "string" && error.error.includes("Overpass 406"));
-}
-
-function demoDiscoverySourceLabel(source: Merchant["source"]) {
-  if (source === "google_places") return "Demo-onboarded from Google Places discovery";
-  if (source === "osm_overpass" || source === "overpass" || source === "osm") return "Demo-onboarded from OSM discovery";
-  return "Demo-onboarded from discovery";
 }
 
 function buildDefaultMerchantRule(merchant: Merchant): MerchantRule {
@@ -1715,11 +1693,6 @@ function countByCategory(merchants: Merchant[]) {
   }, {});
 }
 
-function shouldAutoDemoOnboard(zone: CommerceZone) {
-  const settings = zone.importSettings as { autoDemoOnboard?: unknown } | undefined;
-  return settings?.autoDemoOnboard !== false;
-}
-
 function formatAddress(tags: Record<string, string>) {
   return [
     [tags["addr:street"], tags["addr:housenumber"]].filter(Boolean).join(" "),
@@ -1752,7 +1725,7 @@ function discoveredBusinessToMerchant(input: {
     address: input.business.address,
     latitude: coordinates?.latitude,
     longitude: coordinates?.longitude,
-    participationStatus: coordinates ? "discovered_only" : "discovered_only_without_coordinates",
+    participationStatus: "partner",
     source: input.business.source === "overpass" ? "overpass" : input.business.source,
     sourceUrl: input.business.sourceUrl,
     confidence: input.business.confidence,
@@ -1760,10 +1733,6 @@ function discoveredBusinessToMerchant(input: {
     goals: [],
     syntheticFields: [],
   };
-}
-
-function shouldCreateDemoPartners() {
-  return process.env.DEMO_MODE === "true" && process.env.ALLOW_DEMO_PARTNER_OFFERS === "true";
 }
 
 function contextCategories(context: ConsumerContextSnapshot) {
@@ -1917,7 +1886,7 @@ function preferredPairings(category: string) {
   return pairings[category] ?? ["cafe", "bookshop"];
 }
 
-function generateDemoPaymentDensity(merchant: Merchant): PaymentDensitySignal {
+function generateSyntheticPaymentDensity(merchant: Merchant): PaymentDensitySignal {
   const seed = deterministicMerchantSeed(merchant);
   const baselineTransactions = categoryBaselineTransactions(merchant.category) + (seed % 18);
   const stateBucket = seed % 10;

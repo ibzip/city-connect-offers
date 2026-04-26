@@ -83,8 +83,8 @@ Merchant discovery is now an onboarding/import action, not a normal wallet-open 
 2. Use the top-banner **Import merchants** button.
 3. Activate by city/country, center coordinate + radius, or coordinate box.
 4. Configure radius, target imported merchants, checkpoint chunk size, categories, and per-category caps.
-5. Click **Preview import** to see radius, existing stored merchant count, planned action, estimated provider request count, caps, Google Places field mask, provider warnings, clamp warnings, and demo-onboarding status.
-6. Click **Activate + import** to create/update a `CommerceZone`, query Google Places in bounded tiles when `GOOGLE_PLACES_API_KEY` is set, store merchants, auto-demo-onboard them when demo flags allow, generate synthetic business data, and refresh real merchant insights.
+5. Click **Preview import** to see radius, existing stored merchant count, planned action, estimated provider request count, caps, Google Places field mask, provider warnings, and clamp warnings.
+6. Click **Activate + import** to create/update a `CommerceZone`, query Google Places in bounded tiles when `GOOGLE_PLACES_API_KEY` is set, store every imported merchant as a real `partner`, attach synthetic products/rules/transactions/redemption (see `Merchant.syntheticFields`), and refresh merchant insights.
 7. If the run pauses, use **Continue import** in the import runs panel.
 
 Repeated imports are incremental. If the requested city already has enough stored merchants for the current target and caps, provider calls are skipped. If you raise the target, radius, categories, or category caps, the importer searches only for missing supply and deduplicates existing merchants. If you lower settings, existing merchants are retained and future imports use the lower settings.
@@ -216,8 +216,6 @@ Optional real integrations:
 - `GOOGLE_PLACES_TIMEOUT_MS`
 - `CITY_IMPORT_RUNTIME_BUDGET_MS`
 - `ENABLE_OVERPASS_IMPORT_FALLBACK`
-- `DEMO_MODE`
-- `ALLOW_DEMO_PARTNER_OFFERS`
 - `ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK`
 - `ENABLE_DEV_RESET`
 
@@ -229,8 +227,8 @@ Optional real integrations:
 - User context uses declared context.
 - Local events use mock events.
 - Negotiation uses deterministic `MockLLMClient` by default; Azure OpenAI can be enabled with env vars and falls back to mock.
-- Seeded merchant data remains fake/seeded. City import uses Google Places as the primary coordinate-bearing source when `GOOGLE_PLACES_API_KEY` is set; Overpass remains the fallback. Imported demo-partner profiles are synthetic and clearly labeled with their discovery source.
-- Redemption is simulated checkout with deterministic seeded token codes. Demo-partner redemption is simulated only.
+- Seeded merchant data remains fake/seeded. City import uses Google Places as the primary coordinate-bearing source when `GOOGLE_PLACES_API_KEY` is set; Overpass remains the fallback. Every imported merchant is treated as a real `partner` in the recommendation pipeline, but its products, rules, transactions, payment density, and redemption signals are synthesised on import (flagged via `Merchant.syntheticFields`). Real partner integrations are not yet wired.
+- Redemption is simulated checkout with deterministic seeded token codes.
 
 ## Pluggable Later
 
@@ -247,7 +245,7 @@ Optional real integrations:
 - City import uses Google Places Nearby Search as the primary paid coordinate-bearing provider when `GOOGLE_PLACES_API_KEY` is set. The field mask is limited to `places.id,places.displayName,places.location,places.primaryType,places.types,places.formattedAddress`; no Place Details calls are made by default, and website/photos/reviews/opening-hours/phone/rating/price fields are not requested.
 - Google Places imports enforce `GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT`, `GOOGLE_PLACES_MAX_IMPORTED_MERCHANTS`, per-category caps, DB result cache, and place-id deduplication.
 - Overpass remains the fallback import provider. Set `OVERPASS_USER_AGENT` so the public endpoint can accept requests reliably. Disable fallback with `ENABLE_OVERPASS_IMPORT_FALLBACK=false`.
-- Up to three Nominatim geocode attempts per orchestration, 3s timeout, DB cache, configured `NOMINATIM_USER_AGENT`, and safe failure to `discovered_only_without_coordinates`.
+- Up to three Nominatim geocode attempts per orchestration, 3s timeout, DB cache, configured `NOMINATIM_USER_AGENT`. Discovered businesses without coordinates are skipped (rather than stored as ineligible).
 - One Tavily enrichment request per orchestration, 4s timeout, no coordinates trusted from Tavily.
 - Azure OpenAI timeout is `AZURE_OPENAI_TIMEOUT_MS`, default 15s.
 - Seeded partners remain enabled under all provider failures.

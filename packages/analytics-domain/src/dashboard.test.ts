@@ -24,11 +24,11 @@ test("dashboard metrics page merchants and report total count", async () => {
 test("repository merchant filters support dashboard query fields", async () => {
   const repository = new SeededRepository();
   await repository.saveMerchant(makeMerchant(1, { category: "bookshop", participationStatus: "partner", source: "manual" }));
-  await repository.saveMerchant(makeMerchant(2, { category: "cafe", participationStatus: "demo_partner", source: "google_places" }));
+  await repository.saveMerchant(makeMerchant(2, { category: "cafe", participationStatus: "partner", source: "google_places" }));
 
   assert.equal(await repository.countMerchants({ source: "google_places" }), 1);
   assert.equal((await repository.listMerchants({ category: "bookshop", query: "merchant 1" })).length, 1);
-  assert.equal((await repository.listMerchants({ participationStatus: "demo_partner" }))[0]?.source, "google_places");
+  assert.equal((await repository.listMerchants({ source: "google_places" }))[0]?.category, "cafe");
 });
 
 function makeMerchant(index: number, overrides: Partial<Merchant> = {}): Merchant {
@@ -40,7 +40,7 @@ function makeMerchant(index: number, overrides: Partial<Merchant> = {}): Merchan
     distanceMeters: 100,
     latitude: 48.1 + index * 0.0001,
     longitude: 11.5 + index * 0.0001,
-    participationStatus: "demo_partner",
+    participationStatus: "partner",
     source: "google_places",
     externalId: `place_${index}`,
     syntheticFields: [],

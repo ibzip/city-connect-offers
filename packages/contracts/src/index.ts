@@ -102,7 +102,6 @@ export const ImportPreviewSchema = z.object({
     "settings_decreased_no_delete",
   ]).default("new_import"),
   settingsChangeSummary: z.array(z.string()).default([]),
-  demoAutoOnboardingEnabled: z.boolean(),
   liveWalletDiscoveryFallbackEnabled: z.boolean().default(false),
 });
 export type ImportPreview = z.infer<typeof ImportPreviewSchema>;
@@ -134,7 +133,6 @@ export const ActivateCommerceZoneRequestSchema = z.object({
   maxTilesPerRun: z.number().int().positive().optional(),
   categories: z.array(SupportedMerchantCategorySchema).optional(),
   categoryCaps: z.record(z.number().int().positive()).optional(),
-  autoDemoOnboard: z.boolean().default(true),
   forceRefresh: z.boolean().default(false),
   previewOnly: z.boolean().default(false),
 });
@@ -154,7 +152,6 @@ export const MerchantImportRunSchema = z.object({
   maxImportedMerchants: z.number().int().positive(),
   maxTilesPerRun: z.number().int().positive(),
   importedCount: z.number().int().nonnegative(),
-  demoPartnerCount: z.number().int().nonnegative(),
   failedCount: z.number().int().nonnegative(),
   continuationCursor: z.string().nullable().optional(),
   warnings: z.array(z.string()).default([]),
@@ -239,12 +236,7 @@ export const OfferTypeSchema = z.enum(["cashback", "discount", "priority_pickup"
 export type OfferType = z.infer<typeof OfferTypeSchema>;
 
 export const MerchantCategorySchema = z.string();
-export const MerchantParticipationStatusSchema = z.enum([
-  "partner",
-  "demo_partner",
-  "discovered_only",
-  "discovered_only_without_coordinates",
-]);
+export const MerchantParticipationStatusSchema = z.enum(["partner"]);
 export type MerchantParticipationStatus = z.infer<typeof MerchantParticipationStatusSchema>;
 
 export const MerchantSyntheticFieldSchema = z.enum(["products", "goals", "rules", "transactions", "redemption"]);
@@ -320,7 +312,6 @@ export const MerchantSchema = z.object({
   sourceUrl: z.string().optional(),
   sourceMetadata: z.record(z.unknown()).optional(),
   syntheticFields: z.array(MerchantSyntheticFieldSchema).default([]),
-  demoDisclosure: z.string().optional(),
   products: z.array(MerchantProductSchema).default([]),
   goals: z.array(MerchantGoalSchema).default([]),
   rule: MerchantRuleSchema.optional(),
@@ -408,7 +399,6 @@ export const CandidateMerchantSchema = z.object({
   participationStatus: MerchantParticipationStatusSchema.optional(),
   calculatedFromCoordinates: z.boolean().default(false),
   coordinateEligible: z.boolean().default(true),
-  demoDisclosure: z.string().optional(),
   businessState: BusinessStateSchema,
   fitScore: z.number().min(0).max(100),
   considered: z.boolean(),
@@ -542,8 +532,6 @@ export const OfferItemSchema = z.object({
   distanceMeters: z.number().int().nonnegative(),
   merchantParticipationStatus: MerchantParticipationStatusSchema.default("partner"),
   merchantSource: z.string().optional(),
-  isSimulatedDemoOffer: z.boolean().default(false),
-  demoDisclosure: z.string().optional(),
 });
 export type OfferItem = z.infer<typeof OfferItemSchema>;
 
@@ -558,8 +546,6 @@ export const OfferSchema = z.object({
   validityMinutes: z.number().int().positive(),
   expiresAt: z.string(),
   createdAt: z.string().optional(),
-  isSimulatedDemoOffer: z.boolean().default(false),
-  disclosure: z.string().optional(),
   items: z.array(OfferItemSchema),
   why: z.array(z.string()).default([]),
 });

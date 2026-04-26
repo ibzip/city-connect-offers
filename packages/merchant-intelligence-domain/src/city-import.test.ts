@@ -7,10 +7,10 @@ import {
   activateCommerceZoneAndImport,
   buildImportJobsForTest,
   buildImportPreview,
-  createDemoPartnerFromDiscoveredMerchant,
+  enrichImportedMerchantWithSyntheticData,
 } from "./index";
 
-test("buildImportPreview clamps hard import caps and keeps category caps", () => {
+test("buildImportPreview clamps radius/tiles but leaves merchant target unclamped", () => {
   const request: ActivateCommerceZoneRequest = {
     mode: "center_radius",
     centerLat: 48.13,
@@ -19,22 +19,45 @@ test("buildImportPreview clamps hard import caps and keeps category caps", () =>
     maxImportedMerchants: 9_000,
     maxTilesPerRun: 99,
     categories: ["cafe", "bookshop"],
-    categoryCaps: { cafe: 500, bookshop: 40 },
-    autoDemoOnboard: true,
+    categoryCaps: { cafe: 5_000, bookshop: 4_000 },
     forceRefresh: false,
     previewOnly: true,
     country: "DE",
   };
   const preview = buildImportPreview(request);
   assert.equal(preview.radiusMeters, 25_000);
-  assert.equal(preview.maxImportedMerchants, 1_500);
+  assert.equal(preview.maxImportedMerchants, 9_000);
   assert.equal(preview.maxTilesPerRun, 50);
-  assert.equal(preview.categoryCaps.cafe, 500);
-  assert.equal(preview.categoryCaps.bookshop, 40);
+  assert.equal(preview.categoryCaps.cafe, 5_000);
+  assert.equal(preview.categoryCaps.bookshop, 4_000);
   assert.ok(preview.warnings.some((warning) => warning.includes("Radius clamped")));
 });
 
-test("demo partner generation is deterministic for an imported OSM merchant in the same time bucket", () => {
+test("buildImportPreview redistributes leftover headroom across categories when total exceeds sum of caps", () => {
+  const request: ActivateCommerceZoneRequest = {
+    mode: "center_radius",
+    centerLat: 48.13,
+    centerLng: 11.58,
+    radiusMeters: 5_000,
+    maxImportedMerchants: 1_000,
+    maxTilesPerRun: 5,
+    categories: ["cafe", "bookshop"],
+    categoryCaps: { cafe: 100, bookshop: 100 },
+    forceRefresh: false,
+    previewOnly: true,
+    country: "DE",
+  };
+  const preview = buildImportPreview(request);
+  assert.equal(preview.categoryCaps.cafe, 500);
+  assert.equal(preview.categoryCaps.bookshop, 500);
+  assert.ok(
+    preview.warnings.some((warning) =>
+      warning.includes("Total target 1000 exceeds the sum of category caps 200"),
+    ),
+  );
+});
+
+test("synthetic enrichment is deterministic for an imported OSM merchant", () => {
   const merchant: Merchant = {
     id: "disc_osm_1",
     externalId: "osm_node_1",
@@ -44,18 +67,17 @@ test("demo partner generation is deterministic for an imported OSM merchant in t
     distanceMeters: 50,
     latitude: 48.13,
     longitude: 11.58,
-    participationStatus: "discovered_only",
+    participationStatus: "partner",
     source: "osm_overpass",
     syntheticFields: [],
     products: [],
     goals: [],
-    demoDisclosure: "Demo-onboarded from OSM discovery.",
   };
-  const left = createDemoPartnerFromDiscoveredMerchant(merchant);
-  const right = createDemoPartnerFromDiscoveredMerchant(merchant);
+  const left = enrichImportedMerchantWithSyntheticData(merchant);
+  const right = enrichImportedMerchantWithSyntheticData(merchant);
+  assert.equal(left.participationStatus, "partner");
   assert.deepEqual(left.products, right.products);
   assert.deepEqual(left.rule, right.rule);
-  assert.match(left.demoDisclosure ?? "", /OSM discovery/);
 });
 
 test("Google city import continues past checkpoint chunks until merchant target is reached", async () => {
@@ -63,8 +85,6 @@ test("Google city import continues past checkpoint chunks until merchant target 
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1000";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const result = await activateCommerceZoneAndImport({
@@ -80,7 +100,6 @@ test("Google city import continues past checkpoint chunks until merchant target 
         maxImportedMerchants: 25,
         maxTilesPerRun: 1,
         categories: ["cafe", "bookshop"],
-        autoDemoOnboard: true,
         forceRefresh: false,
         previewOnly: false,
       },
@@ -100,8 +119,6 @@ test("Google city import stops with explicit request-cap reason", async () => {
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const result = await activateCommerceZoneAndImport({
@@ -117,7 +134,6 @@ test("Google city import stops with explicit request-cap reason", async () => {
         maxImportedMerchants: 50,
         maxTilesPerRun: 1,
         categories: ["cafe", "bookshop"],
-        autoDemoOnboard: true,
         forceRefresh: false,
         previewOnly: false,
       },
@@ -156,8 +172,6 @@ test("repeating city activation reuses stored merchants without Google calls", a
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1000";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const request: ActivateCommerceZoneRequest = {
@@ -171,7 +185,6 @@ test("repeating city activation reuses stored merchants without Google calls", a
       maxImportedMerchants: 10,
       maxTilesPerRun: 1,
       categories: ["cafe"],
-      autoDemoOnboard: true,
       forceRefresh: false,
       previewOnly: false,
     };
@@ -195,8 +208,6 @@ test("increasing city import target creates incremental run and skips existing m
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1000";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const request: ActivateCommerceZoneRequest = {
@@ -211,7 +222,6 @@ test("increasing city import target creates incremental run and skips existing m
       maxTilesPerRun: 1,
       categories: ["cafe", "bookshop"],
       categoryCaps: { cafe: 40, bookshop: 40 },
-      autoDemoOnboard: true,
       forceRefresh: false,
       previewOnly: false,
     };
@@ -242,8 +252,6 @@ test("decreasing city import settings keeps stored merchants and skips provider 
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1000";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const request: ActivateCommerceZoneRequest = {
@@ -258,7 +266,6 @@ test("decreasing city import settings keeps stored merchants and skips provider 
       maxTilesPerRun: 1,
       categories: ["cafe"],
       categoryCaps: { cafe: 20 },
-      autoDemoOnboard: true,
       forceRefresh: false,
       previewOnly: false,
     };
@@ -289,8 +296,6 @@ test("force refresh bypasses stored city merchant cache", async () => {
   process.env.GOOGLE_PLACES_API_KEY = "test_key";
   process.env.CITY_IMPORT_POI_PROVIDER = "google_places";
   process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT = "1000";
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   try {
     const repository = new SeededRepository();
     const request: ActivateCommerceZoneRequest = {
@@ -304,7 +309,6 @@ test("force refresh bypasses stored city merchant cache", async () => {
       maxImportedMerchants: 10,
       maxTilesPerRun: 1,
       categories: ["cafe"],
-      autoDemoOnboard: true,
       forceRefresh: false,
       previewOnly: false,
     };
@@ -357,8 +361,6 @@ function installGooglePlacesMock() {
       delete process.env.GOOGLE_PLACES_API_KEY;
       delete process.env.CITY_IMPORT_POI_PROVIDER;
       delete process.env.GOOGLE_PLACES_MAX_REQUESTS_PER_IMPORT;
-      delete process.env.DEMO_MODE;
-      delete process.env.ALLOW_DEMO_PARTNER_OFFERS;
     },
   };
 }

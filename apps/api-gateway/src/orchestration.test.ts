@@ -9,8 +9,6 @@ globalThis.fetch = async () => {
 };
 
 function setup() {
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
   const repository = new SeededRepository();
   setRepositoryForTests(repository);
   return repository;

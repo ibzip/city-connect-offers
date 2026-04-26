@@ -55,17 +55,8 @@ function merchant(status: Merchant["participationStatus"], withCoordinates = tru
   };
 }
 
-test("participationStatusValidator rejects discovered-only merchants", () => {
-  assert.equal(participationStatusValidator(decision, [merchant("discovered_only")]).passed, false);
-});
-
-test("participationStatusValidator allows demo partners only in demo mode", () => {
-  process.env.DEMO_MODE = "false";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "false";
-  assert.equal(participationStatusValidator(decision, [merchant("demo_partner")]).passed, false);
-  process.env.DEMO_MODE = "true";
-  process.env.ALLOW_DEMO_PARTNER_OFFERS = "true";
-  assert.equal(participationStatusValidator(decision, [merchant("demo_partner")]).passed, true);
+test("participationStatusValidator passes for partner merchants", () => {
+  assert.equal(participationStatusValidator(decision, [merchant("partner")]).passed, true);
 });
 
 test("coordinateRequiredValidator excludes coordinate-less merchants", () => {

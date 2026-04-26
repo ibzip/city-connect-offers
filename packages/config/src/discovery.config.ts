@@ -4,7 +4,7 @@ export const discoveryConfig = {
   defaultCityImportRadiusMeters: 20_000,
   absoluteMaxRadiusMeters: 25_000,
   defaultMaxImportedMerchants: 1_000,
-  absoluteMaxImportedMerchants: 1_500,
+  absoluteMaxImportedMerchants: 100_000,
   defaultMaxTilesPerRun: 25,
   absoluteMaxTilesPerRun: 50,
   googlePlacesDefaultMaxRequestsPerImport: 1_000,
@@ -120,8 +120,8 @@ export function getGooglePlacesMaxRequestsPerImport() {
 
 export function getGooglePlacesMaxImportedMerchants() {
   return clampPositiveInteger(
-    Number(process.env.GOOGLE_PLACES_MAX_IMPORTED_MERCHANTS ?? discoveryConfig.defaultMaxImportedMerchants),
-    discoveryConfig.defaultMaxImportedMerchants,
+    Number(process.env.GOOGLE_PLACES_MAX_IMPORTED_MERCHANTS ?? discoveryConfig.absoluteMaxImportedMerchants),
+    discoveryConfig.absoluteMaxImportedMerchants,
     discoveryConfig.absoluteMaxImportedMerchants,
   );
 }

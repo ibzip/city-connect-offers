@@ -120,7 +120,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       await clients.analytics.record({
         type: "merchant_import_completed",
         layer: "merchant_intelligence",
-        message: `Merchant import ${result.importRun.status}: ${result.importRun.importedCount} merchant(s), ${result.importRun.demoPartnerCount} demo partner(s).`,
+        message: `Merchant import ${result.importRun.status}: ${result.importRun.importedCount} merchant(s) imported.`,
         payload: result as unknown as Record<string, unknown>,
       });
       return json(200, result);
@@ -590,7 +590,7 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
         type: "offer_shown",
         layer: "offer",
         offerId: offer.offerId,
-        message: offer.isSimulatedDemoOffer ? `Simulated demo offer shown: ${offer.headline}` : `Offer shown: ${offer.headline}`,
+        message: `Offer shown: ${offer.headline}`,
         payload: offer,
       }));
     }
@@ -805,8 +805,7 @@ async function loadStoredMerchantsForWallet(
 function storedMerchantCanEnterSearch(merchant: Merchant) {
   if (merchant.latitude === undefined || merchant.longitude === undefined) return false;
   const status = merchant.participationStatus ?? "partner";
-  const demoAllowed = process.env.DEMO_MODE === "true" && process.env.ALLOW_DEMO_PARTNER_OFFERS === "true";
-  if (status !== "partner" && !(status === "demo_partner" && demoAllowed)) return false;
+  if (status !== "partner") return false;
   if ((merchant.rule?.dailyBudgetRemainingEuro ?? 0) <= 0) return false;
   if ((merchant.rule?.offerTypesAllowed.length ?? 0) === 0) return false;
   return true;

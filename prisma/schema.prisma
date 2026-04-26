@@ -254,7 +254,6 @@ model MerchantImportRun {
   maxImportedMerchants  Int
   maxTilesPerRun        Int
   importedCount         Int      @default(0)
-  demoPartnerCount      Int      @default(0)
   failedCount           Int      @default(0)
   continuationCursor    String?
   warningsJson          String

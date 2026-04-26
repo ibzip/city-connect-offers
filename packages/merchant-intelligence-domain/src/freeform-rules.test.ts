@@ -12,7 +12,7 @@ const merchant: Merchant = {
   distanceMeters: 80,
   latitude: 48.13,
   longitude: 11.57,
-  participationStatus: "demo_partner",
+  participationStatus: "partner",
   source: "manual",
   syntheticFields: [],
   products: [

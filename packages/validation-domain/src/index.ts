@@ -85,20 +85,17 @@ export function walkingDistanceValidator(
 }
 
 export function participationStatusValidator(decision: NegotiationDecision, merchants: Merchant[]): ValidationCheck {
-  const demoAllowed = process.env.DEMO_MODE === "true" && process.env.ALLOW_DEMO_PARTNER_OFFERS === "true";
   const failed = decision.selectedMerchants.find((selection) => {
     const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
     const status = merchant?.participationStatus ?? "partner";
-    if (status === "partner") return false;
-    if (status === "demo_partner" && demoAllowed) return false;
-    return true;
+    return status !== "partner";
   });
   return {
     validator: "participation_status",
     passed: !failed,
     detail: failed
-      ? "Selected merchant is not eligible: discovered-only merchants cannot receive offers, and demo partners require demo flags."
-      : "Selected merchants are either partners or demo partners allowed by demo flags.",
+      ? `Selected merchant has ineligible participation status ${failed.merchantId}.`
+      : "Selected merchants are partners.",
   };
 }
 

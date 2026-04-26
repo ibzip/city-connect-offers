@@ -41,7 +41,6 @@ export function buildOfferDisplayModel(
     const distanceMeters = merchant && context.userLocation && merchant.latitude !== undefined && merchant.longitude !== undefined
       ? calculateDistanceMeters(context.userLocation.latitude, context.userLocation.longitude, merchant.latitude, merchant.longitude)
       : merchant?.distanceMeters ?? 0;
-    const isSimulatedDemoOffer = merchant?.participationStatus === "demo_partner";
     return {
       offerItemId: makeId("offer_item"),
       offerId,
@@ -55,11 +54,8 @@ export function buildOfferDisplayModel(
       distanceMeters,
       merchantParticipationStatus: merchant?.participationStatus ?? "partner",
       merchantSource: merchant?.source,
-      isSimulatedDemoOffer,
-      demoDisclosure: merchant?.demoDisclosure,
     };
   });
-  const isSimulatedDemoOffer = items.some((item) => item.isSimulatedDemoOffer);
 
   return {
     offerId,
@@ -72,10 +68,6 @@ export function buildOfferDisplayModel(
     validityMinutes: decision.validityMinutes,
     expiresAt,
     createdAt,
-    isSimulatedDemoOffer,
-    disclosure: isSimulatedDemoOffer
-      ? "Simulated demo offer. The discovered business has not consented as an official partner; redemption is simulated only."
-      : undefined,
     items,
     why: decision.reasoning,
   };

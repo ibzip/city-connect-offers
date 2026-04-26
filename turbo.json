@@ -27,8 +27,6 @@
     "LLM_PROVIDER",
     "NOMINATIM_USER_AGENT",
     "OVERPASS_USER_AGENT",
-    "DEMO_MODE",
-    "ALLOW_DEMO_PARTNER_OFFERS",
     "ENABLE_DEV_RESET"
   ],
   "globalPassThroughEnv": [
