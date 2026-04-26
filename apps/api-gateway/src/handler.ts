@@ -25,6 +25,7 @@ import {
   RedeemTokenRequestSchema,
   UserEventSchema,
   UserProfileUpdateSchema,
+  type AgentRunMeta,
   type AgentTrace,
   type AnalyticsEvent,
   type AssembledUserContext,
@@ -52,6 +53,7 @@ import {
   FreeformRuleCompilationError,
 } from "@city-wallet/merchant-intelligence-domain";
 import { BackendNegotiatorError } from "@city-wallet/negotiation-domain";
+import { createDefaultProviders } from "@city-wallet/providers";
 import {
   collectRawSignals,
   computeSignalsHash,
@@ -368,6 +370,15 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
     if (method === "GET" && path === "/api/consumer/connected-sources") {
       const userId = event.queryStringParameters?.userId ?? "user_mia";
       return json(200, await buildConnectedSourceChips(userId));
+    }
+
+    if (method === "GET" && path === "/api/geocode/reverse") {
+      const lat = Number(event.queryStringParameters?.lat);
+      const lng = Number(event.queryStringParameters?.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        return json(400, { error: "lat and lng query params are required and must be numbers" });
+      }
+      return json(200, await reverseGeocodeForWallet(lat, lng));
     }
 
     if (method === "GET" && path === "/api/consumer/context-summary") {
@@ -756,6 +767,7 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
     }));
 
     let negotiation: Awaited<ReturnType<typeof clients.negotiation.negotiate>>;
+    const negotiationStart = Date.now();
     try {
       negotiation = await clients.negotiation.negotiate({
         userEvent,
@@ -769,6 +781,16 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
     } catch (error) {
       if (error instanceof BackendNegotiatorError) {
         console.warn(`[api-gateway] backend negotiator failed (${error.type}): ${error.message}`);
+        const backendNegotiatorTrace: AgentRunMeta = {
+          provider: "azure_openai",
+          validationStatus: "failed",
+          errorType: error.type,
+          latencyMs: Date.now() - negotiationStart,
+        };
+        const agentTraceWithBackend: AgentTrace = {
+          ...(userContextPipeline.agentTrace ?? { assembler: null, userNegotiator: null }),
+          backendNegotiator: backendNegotiatorTrace,
+        };
         analyticsEvents.push(await clients.analytics.record({
           type: "backend_negotiator_failed",
           layer: "negotiation",
@@ -800,7 +822,7 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
             discoveredMerchants,
             assembledUserContext: userContextPipeline.assembledUserContext,
             userNegotiationPosition: userContextPipeline.userNegotiationPosition,
-            agentTrace: userContextPipeline.agentTrace,
+            agentTrace: agentTraceWithBackend,
             noOfferReason: "agent_failed",
           },
         });
@@ -818,6 +840,16 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       Array.isArray((negotiation.negotiationDecision as { selectedMerchants?: unknown }).selectedMerchants);
     if (!decisionShapeOk) {
       console.warn("[api-gateway] backend negotiator returned a malformed NegotiationDecision; halting with no_offer.");
+      const backendNegotiatorTrace: AgentRunMeta = {
+        provider: "azure_openai",
+        validationStatus: "failed",
+        errorType: "schema_validation_failed",
+        latencyMs: Date.now() - negotiationStart,
+      };
+      const agentTraceWithBackend: AgentTrace = {
+        ...(userContextPipeline.agentTrace ?? { assembler: null, userNegotiator: null }),
+        backendNegotiator: backendNegotiatorTrace,
+      };
       analyticsEvents.push(await clients.analytics.record({
         type: "backend_negotiator_failed",
         layer: "negotiation",
@@ -849,12 +881,21 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
           discoveredMerchants,
           assembledUserContext: userContextPipeline.assembledUserContext,
           userNegotiationPosition: userContextPipeline.userNegotiationPosition,
-          agentTrace: userContextPipeline.agentTrace,
+          agentTrace: agentTraceWithBackend,
           noOfferReason: "agent_failed",
         },
       });
     }
     await repository.saveNegotiationDecision(decisionId, negotiation.negotiationBrief.briefId, negotiation.negotiationDecision);
+    const backendNegotiatorTrace: AgentRunMeta = {
+      provider: "azure_openai",
+      validationStatus: "ok",
+      latencyMs: Date.now() - negotiationStart,
+    };
+    const agentTraceWithBackend: AgentTrace = {
+      ...(userContextPipeline.agentTrace ?? { assembler: null, userNegotiator: null }),
+      backendNegotiator: backendNegotiatorTrace,
+    };
     analyticsEvents.push(await clients.analytics.record({
       type: "negotiation_decision_created",
       layer: "negotiation",
@@ -991,7 +1032,7 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
         discoveredMerchants,
         assembledUserContext: userContextPipeline.assembledUserContext,
         userNegotiationPosition: userContextPipeline.userNegotiationPosition,
-        agentTrace: userContextPipeline.agentTrace,
+        agentTrace: agentTraceWithBackend,
         noOfferReason: postNegotiationNoOfferReason,
         nearbyMerchantSearch: {
           ...storedSupply.metadata,
@@ -1697,6 +1738,45 @@ const SIMULATOR_SOURCE_LABELS: Record<string, string> = {
   time: "Time of day",
   merchant_density: "Local merchant density",
 };
+
+// Lightweight reverse-geocoder used by the wallet to resolve a city label
+// the moment we have coordinates, in parallel with the slower orchestrate()
+// pipeline. Uses the same provider stack that `buildConsumerContextSnapshot`
+// uses, so the city label here matches what eventually lands in the snapshot.
+const sharedGeocodingProviders = createDefaultProviders();
+
+async function reverseGeocodeForWallet(latitude: number, longitude: number) {
+  const geocoder = sharedGeocodingProviders.geocoding;
+  if (!geocoder?.reverseGeocode) {
+    return { city: null, countryCode: null, displayName: null, provider: "none", durationMs: 0 } as const;
+  }
+  const startedAt = Date.now();
+  try {
+    const result = await geocoder.reverseGeocode(
+      { latitude, longitude },
+      { budget: defaultProviderBudget(), cache: undefined },
+    );
+    const provider = process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_PLACES_API_KEY
+      ? "google_geocoding"
+      : "nominatim";
+    return {
+      city: result?.city ?? null,
+      countryCode: result?.countryCode ?? null,
+      displayName: result?.displayName ?? null,
+      provider,
+      durationMs: Date.now() - startedAt,
+    } as const;
+  } catch (error) {
+    return {
+      city: null,
+      countryCode: null,
+      displayName: null,
+      provider: "error",
+      error: error instanceof Error ? error.message : "reverse_geocode_failed",
+      durationMs: Date.now() - startedAt,
+    } as const;
+  }
+}
 
 async function buildConnectedSourceChips(userId: string): Promise<ConnectedSourceChip[]> {
   const repository = getRepository();

@@ -150,6 +150,9 @@ importers:
       '@city-wallet/negotiation-domain':
         specifier: workspace:*
         version: link:../../packages/negotiation-domain
+      '@city-wallet/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
       '@city-wallet/raw-context-domain':
         specifier: workspace:*
         version: link:../../packages/raw-context-domain

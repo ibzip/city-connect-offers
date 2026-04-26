@@ -100,6 +100,21 @@ export function fetchConnectedSources(userId: string) {
   return apiGet<ConnectedSourceChip[]>(`/api/consumer/connected-sources?userId=${encodeURIComponent(userId)}`);
 }
 
+export interface ReverseGeocodeResponse {
+  city: string | null;
+  countryCode: string | null;
+  displayName: string | null;
+  provider: string;
+  durationMs: number;
+  error?: string;
+}
+
+export function reverseGeocode(latitude: number, longitude: number) {
+  return apiGet<ReverseGeocodeResponse>(
+    `/api/geocode/reverse?lat=${encodeURIComponent(String(latitude))}&lng=${encodeURIComponent(String(longitude))}`,
+  );
+}
+
 export function fetchContextSummary(userId: string) {
   return apiGet<{
     context: unknown;

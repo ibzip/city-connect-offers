@@ -289,6 +289,7 @@ Optional real integrations:
 - `AZURE_OPENAI_API_KEY`
 - `AZURE_OPENAI_API_VERSION`
 - `AZURE_OPENAI_TIMEOUT_MS`
+- `BACKEND_NEGOTIATOR_TIMEOUT_MS` (overrides `AZURE_OPENAI_TIMEOUT_MS` for the strict NegotiationDecision call only; defaults to 60s, useful when reasoning-class deployments need a longer ceiling than other Azure calls)
 - `PAYONE_API_KEY`
 - `WEATHER_API_KEY`
 - `TAVILY_API_KEY`
@@ -341,7 +342,7 @@ Optional real integrations:
 - Overpass remains the fallback import provider. Set `OVERPASS_USER_AGENT` so the public endpoint can accept requests reliably. Disable fallback with `ENABLE_OVERPASS_IMPORT_FALLBACK=false`.
 - Up to three Nominatim geocode attempts per orchestration, 3s timeout, DB cache, configured `NOMINATIM_USER_AGENT`. Discovered businesses without coordinates are skipped (rather than stored as ineligible).
 - One Tavily enrichment request per orchestration, 4s timeout, no coordinates trusted from Tavily.
-- Azure OpenAI timeout is `AZURE_OPENAI_TIMEOUT_MS`, default 45s. Per-agent timeouts default to the same 45s and can be tuned independently via `USER_CONTEXT_AGENT_TIMEOUT_MS` and `USER_NEGOTIATOR_AGENT_TIMEOUT_MS`.
+- Azure OpenAI timeout is `AZURE_OPENAI_TIMEOUT_MS`, default 60s. Per-stage overrides: `USER_CONTEXT_AGENT_TIMEOUT_MS` and `USER_NEGOTIATOR_AGENT_TIMEOUT_MS` for the user-context pipeline, and `BACKEND_NEGOTIATOR_TIMEOUT_MS` for the strict NegotiationDecision call (default 60s, falls back to `AZURE_OPENAI_TIMEOUT_MS` if unset). Bump the negotiator override on slow reasoning-class deployments where gpt-5.x routinely exceeds the global ceiling.
 - Seeded partners remain enabled under all provider failures.
 
 ## Idempotency And Cooldown

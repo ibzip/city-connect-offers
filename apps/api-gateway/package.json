@@ -21,6 +21,7 @@
     "@city-wallet/db": "workspace:*",
     "@city-wallet/merchant-intelligence-domain": "workspace:*",
     "@city-wallet/negotiation-domain": "workspace:*",
+    "@city-wallet/providers": "workspace:*",
     "@city-wallet/raw-context-domain": "workspace:*",
     "@city-wallet/redemption-domain": "workspace:*",
     "@city-wallet/service-clients": "workspace:*",

@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Bell, Loader2, MapPin, RefreshCw, Sliders, Sparkles, X } from "lucide-react";
 import type {
+  AgentRunMeta,
+  AgentTrace,
+  AssembledUserContext,
   ConnectedSourceChip,
   ConsumerContextSnapshot,
   Offer,
@@ -31,6 +34,7 @@ import {
   orchestrate,
   rejectOffer,
   resetUserState,
+  reverseGeocode,
   updateUserProfile,
 } from "./api";
 
@@ -61,6 +65,18 @@ type ConsumerState = {
 
 type WalletTab = "offers" | "redeem";
 
+// Staged reveal of the lunch-break pipeline. The browser resolves location
+// before we ever call the server, and the API returns context + offers in a
+// single response — so to make the experience feel sequential we walk the UI
+// through these stages one at a time:
+//   idle           → notification overlay visible, nothing else interactive
+//   locating       → asking the browser for geolocation
+//   located        → coords in hand, server hasn't been called yet
+//   assembling     → orchestrate() in flight; the LLM is reading context
+//   context_ready  → orchestrate() returned; show the assimilated context
+//   offers         → finally reveal offer cards
+type RevealStage = "idle" | "locating" | "located" | "assembling" | "context_ready" | "offers";
+
 export function WalletApp() {
   const [state, setState] = useState<ConsumerState | null>(null);
   const [lastRun, setLastRun] = useState<OrchestrationResult | null>(null);
@@ -70,13 +86,21 @@ export function WalletApp() {
   const [contextSummary, setContextSummary] = useState<Awaited<ReturnType<typeof fetchContextSummary>> | null>(null);
   const [debugMode, setDebugMode] = useState(false);
   const [locationCoords, setLocationCoords] = useState<{ latitude: number; longitude: number; accuracyMeters?: number } | null>(null);
-  const [showLunchBanner, setShowLunchBanner] = useState(true);
-  const [hasTriggered, setHasTriggered] = useState(false);
+  // Pre-fetched city label, populated in parallel with orchestrate() so the
+  // header flips from "resolving…" to the resolved city the moment the
+  // dedicated reverse-geocode endpoint answers (Google Geocoding ~150-300ms)
+  // — instead of waiting for the full LLM-driven orchestrate pipeline.
+  const [cityPreview, setCityPreview] = useState<{ city: string | null; countryCode: string | null } | null>(null);
+  const [revealStage, setRevealStage] = useState<RevealStage>("idle");
   const [tab, setTab] = useState<WalletTab>("offers");
   const [rejectedOfferIds, setRejectedOfferIds] = useState<Set<string>>(new Set());
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [whyOpen, setWhyOpen] = useState(false);
   const bootstrapped = useRef(false);
+
+  // hasTriggered = "we've moved past the notification overlay". Used by the
+  // header/body to flip from awaiting-tap to active-pipeline rendering.
+  const hasTriggered = revealStage !== "idle";
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -133,17 +157,38 @@ export function WalletApp() {
   }, []);
 
   const triggerLunchPipeline = useCallback(async () => {
+    if (busy) return;
     setBusy(true);
     setApiError(null);
+    setRevealStage("locating");
     try {
       const coords = await requestLocation();
       if (!coords) {
         setApiError("We need your live location to find lunch options nearby. Please allow location and try again.");
+        setRevealStage("idle");
         return;
       }
       setLocationCoords(coords);
-      setShowLunchBanner(false);
-      setHasTriggered(true);
+      setCityPreview(null);
+      // Kick off a dedicated reverse-geocode in parallel with the orchestrate
+      // call. We don't await it here — whichever finishes first (Google's
+      // Geocoding API is typically ~150-300ms) updates the UI; orchestrate
+      // takes seconds because it includes the LLM, negotiation, etc.
+      void reverseGeocode(coords.latitude, coords.longitude)
+        .then((res) => {
+          if (res.city || res.countryCode) {
+            setCityPreview({ city: res.city, countryCode: res.countryCode });
+          }
+        })
+        .catch(() => {
+          // Silent fallback: orchestrate's own reverse-geocode will populate
+          // the city when the snapshot lands.
+        });
+      // Show "located" before we kick off the server work so the user sees
+      // the location step land first.
+      setRevealStage("located");
+      await delay(450);
+      setRevealStage("assembling");
       const result = await orchestrate({
         userId,
         eventType: "LunchBreakNotificationClicked",
@@ -151,17 +196,30 @@ export function WalletApp() {
       });
       setLastRun(result);
       await loadState();
+      // Reveal the assimilated user context first, then offers, so the user
+      // sees what we picked up before the offer cards land.
+      setRevealStage("context_ready");
+      await delay(700);
+      setRevealStage("offers");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not reach City Wallet.");
     } finally {
       setBusy(false);
     }
-  }, [loadState, requestLocation]);
+  }, [busy, loadState, requestLocation]);
 
   const refresh = useCallback(async () => {
     if (!locationCoords) return triggerLunchPipeline();
     setBusy(true);
     setApiError(null);
+    setRevealStage("assembling");
+    void reverseGeocode(locationCoords.latitude, locationCoords.longitude)
+      .then((res) => {
+        if (res.city || res.countryCode) {
+          setCityPreview({ city: res.city, countryCode: res.countryCode });
+        }
+      })
+      .catch(() => {});
     try {
       const result = await orchestrate({
         userId,
@@ -170,6 +228,9 @@ export function WalletApp() {
       });
       setLastRun(result);
       await loadState();
+      setRevealStage("context_ready");
+      await delay(500);
+      setRevealStage("offers");
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Could not reach City Wallet.");
     } finally {
@@ -216,24 +277,25 @@ export function WalletApp() {
     }
   }, [locationCoords, refresh, userId]);
 
-  // Prefer the live run's offers (multi-offer aware) and fall back to the
-  // server state for offers that have already been persisted (e.g. between
-  // a refresh while offer/token already exist).
+  // The DB-backed `state.offers` is authoritative for offer status (it
+  // reflects accept/reject/redeem transitions). `lastRun.offers` is a
+  // snapshot of the most recent orchestration and goes stale the moment we
+  // claim or reject an offer. Merge with state-wins precedence so an
+  // accepted offer is no longer marked "shown" and disappears from the list.
   const offers = useMemo<Offer[]>(() => {
     const fromRun = lastRun?.offers && lastRun.offers.length > 0
       ? lastRun.offers
       : lastRun?.offer
         ? [lastRun.offer]
         : [];
-    const stateOffers = state?.offers ?? [];
-    const merged: Offer[] = [];
-    const seen = new Set<string>();
-    for (const offer of [...fromRun, ...stateOffers]) {
-      if (!offer || seen.has(offer.offerId)) continue;
-      seen.add(offer.offerId);
-      merged.push(offer);
+    const byId = new Map<string, Offer>();
+    for (const offer of state?.offers ?? []) byId.set(offer.offerId, offer);
+    for (const offer of fromRun) {
+      if (offer && !byId.has(offer.offerId)) byId.set(offer.offerId, offer);
     }
-    return merged.filter((offer) => !rejectedOfferIds.has(offer.offerId) && offer.status !== "dismissed");
+    return Array.from(byId.values()).filter(
+      (offer) => !rejectedOfferIds.has(offer.offerId) && offer.status !== "dismissed",
+    );
   }, [lastRun, rejectedOfferIds, state]);
 
   const visibleOffers = useMemo(() => offers.filter((offer) => offer.status === "shown"), [offers]);
@@ -254,11 +316,14 @@ export function WalletApp() {
                 {profile?.displayName?.[0] ?? "M"}
               </div>
               <div className="flex items-center gap-2">
-                {hasTriggered ? (
-                  <ProviderBadge label={context?.userCityName ?? context?.zoneName ?? "locating"} tone="green" />
-                ) : (
-                  <ProviderBadge label="awaiting location" tone="blue" />
-                )}
+                <StageBadge
+                  stage={revealStage}
+                  cityName={
+                    cityPreview?.city
+                      ? (cityPreview.countryCode ? `${cityPreview.city}, ${cityPreview.countryCode}` : cityPreview.city)
+                      : context?.userCityName ?? context?.zoneName ?? null
+                  }
+                />
                 <button
                   type="button"
                   aria-label="Preferences"
@@ -271,28 +336,18 @@ export function WalletApp() {
             </div>
             <p className="mb-1 text-sm font-medium text-ink-muted">Hello, {profile?.displayName ?? "Mia"}</p>
             <h1 className="font-serif text-3xl font-medium tracking-tight">€1,482.90</h1>
-            {hasTriggered && context ? (
-              <ContextStrip context={context} coords={locationCoords} />
-            ) : (
+            {revealStage === "idle" ? (
               <p className="mt-2 font-mono text-xs text-ink-muted">
-                Tap your lunch reminder to share live context.
+                Waiting for your lunch reminder.
               </p>
+            ) : (
+              <LocationStrip
+                stage={revealStage}
+                coords={locationCoords}
+                context={context}
+                cityPreview={cityPreview}
+              />
             )}
-            {hasTriggered && connectedSources.length > 0 ? (
-              <div className="mt-4 flex flex-wrap gap-1.5">
-                {connectedSources
-                  .filter((chip) => chip.status !== "not_connected")
-                  .slice(0, 8)
-                  .map((chip) => (
-                    <Badge
-                      key={chip.source}
-                      tone={chip.status === "connected" ? "green" : chip.status === "simulated_for_demo" ? "blue" : "neutral"}
-                    >
-                      {chip.label}
-                    </Badge>
-                  ))}
-              </div>
-            ) : null}
             {debugMode && state?.activeMockProfile ? (
               <div className="mt-3 rounded-md border border-black/10 bg-black/[0.03] px-3 py-2 font-mono text-[10px] uppercase tracking-wide text-ink-muted">
                 <div className="font-semibold text-ink">scenario · {state.activeMockProfile.name}</div>
@@ -306,11 +361,38 @@ export function WalletApp() {
           </div>
 
           <div className="surface-paper flex flex-1 flex-col gap-5 overflow-y-auto rounded-t-[2rem] px-5 py-7">
-            {showLunchBanner && !hasTriggered ? (
-              <LunchBreakBanner busy={busy} onActivate={triggerLunchPipeline} />
+            {revealStage === "locating" || revealStage === "located" || revealStage === "assembling" ? (
+              <PipelineStepCard
+                icon={<MapPin size={16} />}
+                title={revealStage === "locating" ? "Looking up your live location" : "Got your location"}
+                subtitle={
+                  revealStage === "locating"
+                    ? "Sharing GPS just for this lunch break."
+                    : locationCoords
+                      ? `±${Math.round(locationCoords.accuracyMeters ?? 0)}m around ${locationCoords.latitude.toFixed(4)}, ${locationCoords.longitude.toFixed(4)}`
+                      : "Coordinates ready."
+                }
+                state={revealStage === "locating" ? "active" : "done"}
+              />
             ) : null}
 
-            {hasTriggered ? (
+            {revealStage === "assembling" ? (
+              <PipelineStepCard
+                icon={<Sparkles size={16} />}
+                title="Reading your live context"
+                subtitle="Turning signals into a useful picture of right now."
+                state="active"
+              />
+            ) : null}
+
+            {(revealStage === "context_ready" || revealStage === "offers") && lastRun ? (
+              <AssembledContextPanel
+                assembled={lastRun.assembledUserContext ?? null}
+                fallbackContext={context}
+              />
+            ) : null}
+
+            {revealStage === "offers" ? (
               <div className="flex items-center gap-1 rounded-full border border-black/10 bg-paper p-1 text-xs">
                 <TabButton active={tab === "offers"} onClick={() => setTab("offers")}>
                   Offers {visibleOffers.length > 0 ? `· ${visibleOffers.length}` : ""}
@@ -333,19 +415,12 @@ export function WalletApp() {
               </div>
             ) : null}
 
-            {hasTriggered && tab === "offers" ? (
+            {revealStage === "offers" && tab === "offers" ? (
               <>
                 <div className="flex items-center justify-between px-2">
                   <h2 className="label-tag font-semibold text-ink-muted">Live local offers</h2>
                   {busy ? <Badge tone="orange">thinking…</Badge> : null}
                 </div>
-
-                {busy && visibleOffers.length === 0 ? (
-                  <div className="surface-card flex items-center gap-3 rounded-2xl p-6">
-                    <Loader2 className="animate-spin text-teal" size={18} />
-                    <div className="text-sm text-ink-muted">Reading your live context and picking offers…</div>
-                  </div>
-                ) : null}
 
                 {!busy && visibleOffers.length === 0 ? (
                   <div className="surface-card rounded-2xl p-6 text-center">
@@ -403,7 +478,7 @@ export function WalletApp() {
               </>
             ) : null}
 
-            {hasTriggered && tab === "redeem" ? (
+            {revealStage === "offers" && tab === "redeem" ? (
               <>
                 <div className="flex items-center justify-between px-2">
                   <h2 className="label-tag font-semibold text-ink-muted">Ready to redeem</h2>
@@ -421,6 +496,9 @@ export function WalletApp() {
 
             <TrustNote />
           </div>
+          {revealStage === "idle" ? (
+            <LunchBreakNotification busy={busy} onActivate={triggerLunchPipeline} />
+          ) : null}
           {prefsOpen && profile ? (
             <PreferencesSheet
               profile={profile}
@@ -476,7 +554,8 @@ export function WalletApp() {
                 <div className="grid gap-4 lg:grid-cols-2">
                   <JsonPanel title="Assembled user context" data={lastRun?.assembledUserContext ?? null} />
                   <JsonPanel title="User negotiation position" data={lastRun?.userNegotiationPosition ?? null} />
-                  <JsonPanel title="Agent trace" data={lastRun?.agentTrace ?? null} />
+                  <AgentTraceSummary trace={lastRun?.agentTrace ?? null} />
+                  <JsonPanel title="Agent trace (raw)" data={lastRun?.agentTrace ?? null} />
                   <JsonPanel title="Negotiation decision" data={lastRun?.negotiationDecision ?? null} />
                   <JsonPanel title="Validation" data={lastRun?.validationResult ?? null} />
                   <JsonPanel title="Run offers" data={lastRun?.offers ?? []} />
@@ -491,36 +570,100 @@ export function WalletApp() {
   );
 }
 
-function LunchBreakBanner({ busy, onActivate }: { busy: boolean; onActivate: () => void }) {
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function AgentTraceSummary({ trace }: { trace: AgentTrace | null | undefined }) {
   return (
-    <button
-      type="button"
-      onClick={onActivate}
-      disabled={busy}
-      className="surface-card animate-fade-in flex w-full items-center gap-3 rounded-2xl border border-teal/30 bg-teal/5 p-4 text-left transition-colors hover:bg-teal/10 disabled:opacity-60"
-    >
-      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-teal text-white">
-        <Bell size={18} />
-      </div>
-      <div className="flex-1">
-        <div className="text-xs font-mono uppercase tracking-wider text-teal">City Wallet</div>
-        <div className="font-serif text-base font-medium">Time for your lunch break</div>
-        <p className="text-xs text-ink-muted">Tap to share your live location and find a useful spot nearby.</p>
-      </div>
-      {busy ? <Loader2 className="animate-spin text-teal" size={16} /> : <MapPin className="text-teal" size={16} />}
-    </button>
+    <div className="surface-acrylic flex flex-col gap-3 rounded-2xl p-4 text-xs text-ink">
+      <div className="font-serif text-sm font-medium text-ink">Agent stages</div>
+      {trace ? (
+        <div className="flex flex-col gap-2">
+          <AgentStageRow label="Assembler" meta={trace.assembler} />
+          <AgentStageRow label="User negotiator" meta={trace.userNegotiator} />
+          <AgentStageRow label="Backend negotiator" meta={trace.backendNegotiator ?? null} />
+        </div>
+      ) : (
+        <div className="text-ink-muted">No agent trace available yet.</div>
+      )}
+    </div>
   );
 }
 
-function ContextStrip({
-  context,
-  coords,
+function AgentStageRow({ label, meta }: { label: string; meta: AgentRunMeta | null | undefined }) {
+  if (!meta) {
+    return (
+      <div className="flex items-center justify-between gap-3 rounded-xl border border-black/5 bg-white/40 px-3 py-2">
+        <span className="font-medium text-ink">{label}</span>
+        <span className="text-ink-muted">— not run</span>
+      </div>
+    );
+  }
+  const status = meta.validationStatus;
+  const tone =
+    status === "ok"
+      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+      : status === "repaired"
+      ? "bg-amber-50 text-amber-800 border-amber-200"
+      : status === "skipped"
+      ? "bg-slate-50 text-slate-600 border-slate-200"
+      : "bg-rose-50 text-rose-700 border-rose-200";
+  return (
+    <div className={`flex flex-col gap-1 rounded-xl border px-3 py-2 ${tone}`}>
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">{label}</span>
+        <span className="font-mono text-[11px] uppercase tracking-wide">{status}</span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-ink-muted">
+        {meta.provider ? <span>provider: {meta.provider}</span> : null}
+        {meta.model ? <span>model: {meta.model}</span> : null}
+        {typeof meta.latencyMs === "number" ? <span>latency: {meta.latencyMs}ms</span> : null}
+        {meta.errorType ? <span className="text-rose-700">error: {meta.errorType}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function StageBadge({
+  stage,
+  cityName,
 }: {
-  context: ConsumerContextSnapshot;
-  coords: { latitude: number; longitude: number; accuracyMeters?: number } | null;
+  stage: RevealStage;
+  cityName: string | null;
 }) {
-  const cityLabel = context.userCityName ?? context.zoneName ?? "—";
-  const weatherLabel = context.weatherDescription ?? context.weatherMood ?? "—";
+  if (stage === "idle") return <ProviderBadge label="awaiting tap" tone="blue" />;
+  if (stage === "locating") return <ProviderBadge label="locating you…" tone="blue" />;
+  // Once we have any resolved city label (from the parallel reverse-geocode
+  // call), surface it immediately — even if the full orchestrate pipeline is
+  // still running. Otherwise stay on the active step label.
+  if (cityName) return <ProviderBadge label={cityName} tone="green" />;
+  if (stage === "located") return <ProviderBadge label="located ✓" tone="green" />;
+  if (stage === "assembling") return <ProviderBadge label="reading context…" tone="purple" />;
+  return <ProviderBadge label="live" tone="green" />;
+}
+
+function LocationStrip({
+  stage,
+  coords,
+  context,
+  cityPreview,
+}: {
+  stage: RevealStage;
+  coords: { latitude: number; longitude: number; accuracyMeters?: number } | null;
+  context: ConsumerContextSnapshot | null;
+  cityPreview: { city: string | null; countryCode: string | null } | null;
+}) {
+  // Prefer the dedicated reverse-geocode result (lands fast, parallel to
+  // orchestrate). Fall back to whatever the orchestrate snapshot ultimately
+  // provides.
+  const previewCity = cityPreview?.city ?? null;
+  const previewCountry = cityPreview?.countryCode ?? null;
+  const cityLabel = previewCity ?? context?.userCityName ?? context?.zoneName ?? null;
+  const countryCode = previewCountry ?? context?.userCountryCode ?? null;
+  const weatherLabel = context?.weatherDescription ?? context?.weatherMood ?? null;
+  const orchestrateDone = stage === "context_ready" || stage === "offers";
+  const cityResolved = Boolean(cityLabel) || orchestrateDone;
   return (
     <div className="mt-3 space-y-1 font-mono text-[11px] text-ink-muted">
       {coords ? (
@@ -528,21 +671,230 @@ function ContextStrip({
           <span className="font-semibold text-ink">live</span> · {coords.latitude.toFixed(4)}, {coords.longitude.toFixed(4)}
           {coords.accuracyMeters ? ` (±${Math.round(coords.accuracyMeters)} m)` : ""}
         </div>
+      ) : (
+        <div>
+          <span className="font-semibold text-ink">live</span> · resolving…
+        </div>
+      )}
+      <div>
+        <span className="font-semibold text-ink">city</span> · {cityResolved ? (cityLabel ?? "—") : "resolving…"}
+        {cityResolved && countryCode ? ` (${countryCode.toUpperCase()})` : ""}
+      </div>
+      {orchestrateDone && weatherLabel ? (
+        <div>
+          <span className="font-semibold text-ink">weather</span> · {weatherLabel}
+        </div>
       ) : null}
-      <div>
-        <span className="font-semibold text-ink">city</span> · {cityLabel}
-        {context.userCountryCode ? ` (${context.userCountryCode.toUpperCase()})` : ""}
+    </div>
+  );
+}
+
+function LunchBreakNotification({
+  busy,
+  onActivate,
+}: {
+  busy: boolean;
+  onActivate: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-30 flex flex-col">
+      <button
+        type="button"
+        aria-label="Dismiss notification and load offers"
+        onClick={onActivate}
+        disabled={busy}
+        className="absolute inset-0 cursor-pointer bg-black/20 backdrop-blur-md transition-colors hover:bg-black/30 disabled:cursor-wait"
+      />
+      <button
+        type="button"
+        onClick={onActivate}
+        disabled={busy}
+        className="surface-card animate-fade-in relative mx-3 mt-3 flex items-start gap-3 rounded-2xl border border-white/40 bg-white/95 p-3 text-left shadow-2xl transition-transform hover:scale-[1.01] active:scale-[0.99] disabled:opacity-70"
+      >
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-teal text-white">
+          <Bell size={16} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2 font-mono text-[10px] uppercase tracking-wider text-ink-muted">
+            <span>City Wallet</span>
+            <span>now</span>
+          </div>
+          <div className="mt-0.5 font-serif text-[15px] font-medium leading-snug">
+            Time for your lunch break
+          </div>
+          <p className="mt-0.5 text-xs leading-snug text-ink-muted">
+            Tap to share your live location and find a useful spot nearby.
+          </p>
+        </div>
+        {busy ? (
+          <Loader2 className="mt-1 animate-spin text-teal" size={14} />
+        ) : (
+          <MapPin className="mt-1 text-teal" size={14} />
+        )}
+      </button>
+    </div>
+  );
+}
+
+function PipelineStepCard({
+  icon,
+  title,
+  subtitle,
+  state,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  subtitle: string;
+  state: "active" | "done";
+}) {
+  return (
+    <div className="surface-card animate-fade-in flex items-center gap-3 rounded-2xl p-4">
+      <div className={
+        state === "active"
+          ? "flex h-9 w-9 items-center justify-center rounded-full bg-teal/10 text-teal"
+          : "flex h-9 w-9 items-center justify-center rounded-full bg-green-100 text-green-700"
+      }>
+        {state === "active" ? <Loader2 className="animate-spin" size={16} /> : icon}
       </div>
-      <div>
-        <span className="font-semibold text-ink">weather</span> · {weatherLabel}
-      </div>
-      <div>
-        <span className="font-semibold text-ink">context</span> · {context.timeContext ?? "—"}
-        {context.declaredIntent ? ` · ${context.declaredIntent.replace(/_/g, " ")}` : ""}
-        {typeof context.availableMinutes === "number" ? ` · ${context.availableMinutes} min free` : ""}
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium text-ink">{title}</div>
+        <p className="mt-0.5 text-xs text-ink-muted">{subtitle}</p>
       </div>
     </div>
   );
+}
+
+function AssembledContextPanel({
+  assembled,
+  fallbackContext,
+}: {
+  assembled: AssembledUserContext | null;
+  fallbackContext: ConsumerContextSnapshot | null;
+}) {
+  const chips = useMemo(() => buildContextChips(assembled, fallbackContext), [assembled, fallbackContext]);
+  const summary = assembled?.currentStateSummary
+    ?? (fallbackContext ? buildFallbackSummary(fallbackContext) : null);
+  const evidence = assembled?.evidence ?? [];
+  const likelyGood = assembled?.likelyGoodCategories ?? [];
+
+  if (!assembled && !fallbackContext) return null;
+
+  return (
+    <div className="surface-card animate-fade-in flex flex-col gap-3 rounded-2xl p-4">
+      <div className="flex items-center justify-between">
+        <h2 className="label-tag font-semibold text-ink-muted">What we picked up</h2>
+        <Badge tone="purple">{assembled ? "from your live signals" : "from your context"}</Badge>
+      </div>
+      {summary ? (
+        <p className="text-sm leading-relaxed text-ink">{summary}</p>
+      ) : null}
+      {chips.length > 0 ? (
+        <div className="flex flex-wrap gap-1.5">
+          {chips.map((chip) => (
+            <Badge key={chip.key} tone={chip.tone}>{chip.label}</Badge>
+          ))}
+        </div>
+      ) : null}
+      {likelyGood.length > 0 ? (
+        <div>
+          <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">
+            Categories that fit
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {likelyGood.slice(0, 6).map((category) => (
+              <Badge key={category} tone="green">{humanizeToken(category)}</Badge>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {evidence.length > 0 ? (
+        <details className="text-sm">
+          <summary className="cursor-pointer text-xs font-medium text-ink-muted hover:text-ink">
+            Why we think this · {evidence.length} signal{evidence.length === 1 ? "" : "s"}
+          </summary>
+          <ul className="mt-2 space-y-1 pl-1 text-xs text-ink-muted">
+            {evidence.map((line, index) => (
+              <li key={`${line}-${index}`} className="flex gap-2">
+                <span className="font-mono text-[10px]">{String(index + 1).padStart(2, "0")}</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+type ContextChip = { key: string; label: string; tone: "neutral" | "blue" | "green" | "purple" | "orange" };
+
+function buildContextChips(
+  assembled: AssembledUserContext | null,
+  fallback: ConsumerContextSnapshot | null,
+): ContextChip[] {
+  const chips: ContextChip[] = [];
+  if (assembled) {
+    if (assembled.inferredIntent) {
+      chips.push({ key: "intent", label: humanizeToken(assembled.inferredIntent), tone: "purple" });
+    }
+    if (assembled.timeContext) {
+      chips.push({ key: "time", label: humanizeToken(assembled.timeContext), tone: "neutral" });
+    }
+    if (assembled.hungerState !== "unknown") {
+      chips.push({ key: "hunger", label: `hunger · ${humanizeToken(assembled.hungerState)}`, tone: "orange" });
+    }
+    if (assembled.moodState !== "unknown") {
+      chips.push({ key: "mood", label: `mood · ${humanizeToken(assembled.moodState)}`, tone: "blue" });
+    }
+    if (assembled.energyState !== "unknown") {
+      chips.push({ key: "energy", label: `energy · ${humanizeToken(assembled.energyState)}`, tone: "green" });
+    }
+    if (assembled.attentionState !== "low_attention") {
+      // Show attention only when it's actionable (do-not-interrupt / interruptible / high).
+      chips.push({ key: "attention", label: `attention · ${humanizeToken(assembled.attentionState)}`, tone: "neutral" });
+    }
+    if (typeof assembled.freeWindowMinutes === "number" && assembled.freeWindowMinutes > 0) {
+      chips.push({ key: "free", label: `~${assembled.freeWindowMinutes} min free`, tone: "green" });
+    }
+    if (assembled.timeSensitivity !== "low") {
+      chips.push({ key: "sensitivity", label: `time · ${humanizeToken(assembled.timeSensitivity)}`, tone: "orange" });
+    }
+    return chips;
+  }
+  // No LLM-derived context — fall back to the deterministic context snapshot
+  // so the panel still shows something meaningful (instead of static demo
+  // labels like "Calendar / Mobility / Mood").
+  if (fallback) {
+    if (fallback.timeContext) {
+      chips.push({ key: "time", label: humanizeToken(fallback.timeContext), tone: "neutral" });
+    }
+    if (fallback.declaredIntent) {
+      chips.push({ key: "intent", label: humanizeToken(fallback.declaredIntent), tone: "purple" });
+    }
+    if (typeof fallback.availableMinutes === "number") {
+      chips.push({ key: "free", label: `~${fallback.availableMinutes} min free`, tone: "green" });
+    }
+    if (fallback.weatherMood) {
+      chips.push({ key: "weather", label: humanizeToken(fallback.weatherMood), tone: "blue" });
+    }
+  }
+  return chips;
+}
+
+function buildFallbackSummary(context: ConsumerContextSnapshot) {
+  const parts: string[] = [];
+  if (context.userCityName ?? context.zoneName) {
+    parts.push(`In ${context.userCityName ?? context.zoneName}`);
+  }
+  if (context.timeContext) parts.push(humanizeToken(context.timeContext));
+  if (context.declaredIntent) parts.push(`looking to ${humanizeToken(context.declaredIntent)}`);
+  if (typeof context.availableMinutes === "number") parts.push(`~${context.availableMinutes} min free`);
+  if (parts.length === 0) return null;
+  return parts.join(" · ") + ".";
+}
+
+function humanizeToken(token: string) {
+  return token.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 function TabButton({

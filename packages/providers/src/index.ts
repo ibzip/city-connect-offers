@@ -360,10 +360,124 @@ function shouldUseCachedGeocode(cached: { result: GeoPoint | null; status: strin
   return Date.now() - updatedAt < 15 * 60 * 1000;
 }
 
-export class GoogleGeocodingProvider {
-  async geocode() {
-    return null;
+// Real Google Geocoding API client. The same `GOOGLE_PLACES_API_KEY` works
+// for the Geocoding API as long as the Cloud project has the Geocoding API
+// enabled (it usually is when Places is). We prefer this over Nominatim
+// because:
+//   - typical p50 latency ~150-300ms vs Nominatim's ~500-2500ms
+//   - no 1 RPS self-imposed rate limit
+//   - Google bills per request, so we don't depend on a public good-citizen
+//     allowance.
+export class GoogleGeocodingProvider implements GeocodingProvider {
+  async geocode(query: string, options: { budget: ProviderBudget; cache?: GeocodingCache }) {
+    const apiKey = googleGeocodingApiKey();
+    if (!apiKey) {
+      recordFallback(options.budget, "google_geocoding", "google_geocoding_api_key_missing");
+      return null;
+    }
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return null;
+    const cached = await options.cache?.get("google_geocoding", normalized);
+    if (cached && shouldUseCachedGeocode(cached)) return cached.result;
+    try {
+      const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+      url.searchParams.set("address", query);
+      url.searchParams.set("key", apiKey);
+      const response = await withTimeout(fetch(url, {
+        headers: { accept: "application/json" },
+      }), Number(process.env.GOOGLE_GEOCODING_TIMEOUT_MS ?? 4_000), "Google Geocoding request");
+      if (!response.ok) throw new Error(`Google Geocoding ${response.status}`);
+      const body = await response.json() as GoogleGeocodeResponse;
+      const first = body.results?.[0];
+      const result = first?.geometry?.location?.lat !== undefined && first?.geometry?.location?.lng !== undefined
+        ? { latitude: first.geometry.location.lat, longitude: first.geometry.location.lng }
+        : null;
+      await options.cache?.set("google_geocoding", normalized, result, result ? "hit" : "not_found");
+      return result;
+    } catch (error) {
+      recordFallback(options.budget, "google_geocoding", error instanceof Error ? error.message : "google_geocoding_failed");
+      await options.cache?.set("google_geocoding", normalized, null, "failed");
+      return null;
+    }
   }
+
+  async reverseGeocode(input: { latitude: number; longitude: number }, options: { budget: ProviderBudget; cache?: GeocodingCache }) {
+    const apiKey = googleGeocodingApiKey();
+    if (!apiKey) {
+      recordFallback(options.budget, "google_geocoding", "google_geocoding_api_key_missing");
+      return null;
+    }
+    const cacheQuery = `reverse:${roundCoordinate(input.latitude, 3)},${roundCoordinate(input.longitude, 3)}`;
+    const cached = await options.cache?.get("google_geocoding", cacheQuery);
+    if (cached && shouldUseCachedGeocode(cached) && cached.result) {
+      const cachedAny = cached.result as unknown as ReverseGeocodeResult & GeoPoint;
+      if (cachedAny.city || cachedAny.countryCode || cachedAny.displayName) {
+        return {
+          city: cachedAny.city,
+          countryCode: cachedAny.countryCode,
+          displayName: cachedAny.displayName,
+        };
+      }
+    }
+    try {
+      const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+      url.searchParams.set("latlng", `${input.latitude},${input.longitude}`);
+      url.searchParams.set("result_type", "locality|postal_town|administrative_area_level_2|administrative_area_level_1");
+      url.searchParams.set("key", apiKey);
+      const response = await withTimeout(fetch(url, {
+        headers: { accept: "application/json" },
+      }), Number(process.env.GOOGLE_GEOCODING_TIMEOUT_MS ?? 4_000), "Google Geocoding reverse request");
+      if (!response.ok) throw new Error(`Google Geocoding reverse ${response.status}`);
+      const body = await response.json() as GoogleGeocodeResponse;
+      const result = pickGoogleReverseResult(body);
+      await options.cache?.set(
+        "google_geocoding",
+        cacheQuery,
+        result as unknown as GeoPoint,
+        result.city || result.countryCode ? "hit" : "not_found",
+      );
+      return result;
+    } catch (error) {
+      recordFallback(options.budget, "google_geocoding", error instanceof Error ? error.message : "google_geocoding_reverse_failed");
+      return null;
+    }
+  }
+}
+
+function googleGeocodingApiKey() {
+  return process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_PLACES_API_KEY || "";
+}
+
+interface GoogleGeocodeResponse {
+  status?: string;
+  results?: Array<{
+    formatted_address?: string;
+    geometry?: { location?: { lat?: number; lng?: number } };
+    address_components?: Array<{ long_name?: string; short_name?: string; types?: string[] }>;
+  }>;
+}
+
+function pickGoogleReverseResult(body: GoogleGeocodeResponse): ReverseGeocodeResult {
+  // Google returns multiple results when filtering by result_type. The first
+  // result (most specific locality match) is usually the right one for a
+  // user's "city" label; fall back to scanning all components if needed.
+  const components: Array<{ long_name?: string; short_name?: string; types?: string[] }> = [];
+  for (const candidate of body.results ?? []) {
+    if (!candidate.address_components) continue;
+    components.push(...candidate.address_components);
+  }
+  const findByType = (type: string) => components.find((component) => component.types?.includes(type));
+  const cityComponent = findByType("locality")
+    ?? findByType("postal_town")
+    ?? findByType("administrative_area_level_2")
+    ?? findByType("administrative_area_level_1");
+  const countryComponent = findByType("country");
+  const displayName = body.results?.[0]?.formatted_address;
+  return {
+    city: cityComponent?.long_name,
+    countryCode: countryComponent?.short_name?.toUpperCase(),
+    displayName,
+  };
 }
 
 export class MapboxGeocodingProvider {
@@ -591,13 +705,18 @@ export class GooglePlacesPOIProvider implements POIProvider {
 }
 
 export function createDefaultProviders() {
+  // Prefer Google's Geocoding API when a key is present (faster, no 1 RPS
+  // self-throttle); fall back to Nominatim only when Google is unavailable.
+  const useGoogleGeocoding = Boolean(process.env.GOOGLE_GEOCODING_API_KEY || process.env.GOOGLE_PLACES_API_KEY);
   return {
     weather: new OpenMeteoWeatherProvider(),
     location: new BrowserLocationInputProvider(),
     paymentDensity: new SimulatedPayoneProvider(),
     userContext: new DeclaredUserContextProvider(),
     localEvents: new MockLocalEventsProvider(),
-    geocoding: new OpenStreetMapNominatimGeocodingProvider(),
+    geocoding: useGoogleGeocoding
+      ? new GoogleGeocodingProvider()
+      : new OpenStreetMapNominatimGeocodingProvider(),
     poi: process.env.GOOGLE_PLACES_API_KEY ? new GooglePlacesPOIProvider() : new OpenStreetMapOverpassPOIProvider(),
     merchantDiscovery: new TavilyMerchantDiscoveryProvider(),
   };

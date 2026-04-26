@@ -347,6 +347,16 @@ export class AzureOpenAILLMClient implements LLMClient {
     url.searchParams.set("api-version", apiVersion);
     const debug = process.env.DEBUG_LLM_AGENTS === "true";
 
+    // Strict-negotiator Azure calls are the slowest stage in the pipeline
+    // (gpt-5.3 reasoning routinely takes longer than the assembler/user
+    // negotiator). Give it its own knob so it can be tuned independently of
+    // the global AZURE_OPENAI_TIMEOUT_MS used by lighter calls. Falls back to
+    // the global value if no dedicated override is set.
+    const negotiatorTimeoutMs = Number(
+      process.env.BACKEND_NEGOTIATOR_TIMEOUT_MS
+        ?? process.env.AZURE_OPENAI_TIMEOUT_MS
+        ?? 60_000,
+    );
     const callAzure = async (messages: Array<{ role: string; content: string }>) => {
       const requestBody: Record<string, unknown> = {
         response_format: { type: "json_object" },
@@ -364,7 +374,7 @@ export class AzureOpenAILLMClient implements LLMClient {
         method: "POST",
         headers: { "content-type": "application/json", "api-key": apiKey },
         body: JSON.stringify(requestBody),
-      }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 45_000), "Azure OpenAI request");
+      }), negotiatorTimeoutMs, "Azure OpenAI request");
       if (!response.ok) {
         const text = await response.text();
         throw new BackendNegotiatorError("request_failed", `Azure OpenAI ${response.status}: ${text}`);

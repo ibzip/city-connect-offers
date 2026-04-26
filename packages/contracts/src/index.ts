@@ -1061,6 +1061,7 @@ export type AgentRunMeta = z.infer<typeof AgentRunMetaSchema>;
 export const AgentTraceSchema = z.object({
   assembler: AgentRunMetaSchema.nullable(),
   userNegotiator: AgentRunMetaSchema.nullable(),
+  backendNegotiator: AgentRunMetaSchema.nullable().optional(),
 });
 export type AgentTrace = z.infer<typeof AgentTraceSchema>;
 
