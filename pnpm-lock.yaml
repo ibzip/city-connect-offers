@@ -144,6 +144,9 @@ importers:
       '@city-wallet/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@city-wallet/redemption-domain':
+        specifier: workspace:*
+        version: link:../../packages/redemption-domain
       '@city-wallet/service-clients':
         specifier: workspace:*
         version: link:../../packages/service-clients
@@ -354,18 +357,27 @@ importers:
       '@city-wallet/data-seed':
         specifier: workspace:*
         version: link:../data-seed
+      '@city-wallet/utils':
+        specifier: workspace:*
+        version: link:../utils
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
 
   packages/merchant-intelligence-domain:
     dependencies:
+      '@city-wallet/config':
+        specifier: workspace:*
+        version: link:../config
       '@city-wallet/contracts':
         specifier: workspace:*
         version: link:../contracts
       '@city-wallet/db':
         specifier: workspace:*
         version: link:../db
+      '@city-wallet/providers':
+        specifier: workspace:*
+        version: link:../providers
       '@city-wallet/utils':
         specifier: workspace:*
         version: link:../utils
@@ -396,6 +408,9 @@ importers:
 
   packages/providers:
     dependencies:
+      '@city-wallet/config':
+        specifier: workspace:*
+        version: link:../config
       '@city-wallet/contracts':
         specifier: workspace:*
         version: link:../contracts
@@ -479,6 +494,9 @@ importers:
       '@city-wallet/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@city-wallet/utils':
+        specifier: workspace:*
+        version: link:../utils
 
 packages:
 

@@ -10,7 +10,7 @@
     "lint": "turbo run lint",
     "typecheck": "turbo run typecheck",
     "db:generate": "prisma generate",
-    "db:migrate": "sqlite3 prisma/dev.db < prisma/migrations/000001_init/migration.sql",
+    "db:migrate": "sqlite3 prisma/dev.db < prisma/migrations/000001_init/migration.sql && sqlite3 prisma/dev.db < prisma/migrations/000002_real_context/migration.sql && sqlite3 prisma/dev.db < prisma/migrations/000003_city_import/migration.sql && sqlite3 prisma/dev.db < prisma/migrations/000004_merchant_scale/migration.sql",
     "db:seed": "node --import tsx prisma/seed.ts",
     "cdk:synth": "pnpm --filter @city-wallet/infra-aws cdk synth",
     "cdk:deploy": "pnpm --filter @city-wallet/infra-aws cdk deploy",

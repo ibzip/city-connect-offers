@@ -1,0 +1,25 @@
+{
+  "name": "@city-wallet/service-clients",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@city-wallet/analytics-domain": "workspace:*",
+    "@city-wallet/context-domain": "workspace:*",
+    "@city-wallet/contracts": "workspace:*",
+    "@city-wallet/db": "workspace:*",
+    "@city-wallet/merchant-intelligence-domain": "workspace:*",
+    "@city-wallet/negotiation-domain": "workspace:*",
+    "@city-wallet/offer-domain": "workspace:*",
+    "@city-wallet/redemption-domain": "workspace:*",
+    "@city-wallet/validation-domain": "workspace:*"
+  }
+}

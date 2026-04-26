@@ -46,4 +46,11 @@ const server = createServer(async (request, response) => {
 
 server.listen(port, () => {
   console.log(`City Wallet API Gateway listening on http://localhost:${port}`);
+  console.log(`City import provider env: ${process.env.CITY_IMPORT_POI_PROVIDER ?? "auto"}`);
+  console.log(`Google Places key visible to API: ${process.env.GOOGLE_PLACES_API_KEY ? `yes (${maskSecret(process.env.GOOGLE_PLACES_API_KEY)})` : "no"}`);
 });
+
+function maskSecret(value: string) {
+  if (value.length <= 8) return "set";
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { Loader2, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, MapPin, RefreshCw, Sparkles } from "lucide-react";
 import type { AnalyticsEvent, ConsumerContextSnapshot, Offer, OrchestrationResult, RedemptionToken, UserProfile } from "@city-wallet/contracts";
 import { Badge, Button, ExplainabilityPanel, JsonPanel, OfferCard, PhoneFrame, ProviderBadge, Section, TrustNote, ValidityPill } from "@city-wallet/ui";
 import { apiGet, claimOffer, orchestrate } from "./api";
@@ -19,9 +19,12 @@ export function WalletApp() {
   const [state, setState] = useState<ConsumerState | null>(null);
   const [lastRun, setLastRun] = useState<OrchestrationResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [declaredIntent, setDeclaredIntent] = useState("warm_city_break");
   const [availableMinutes, setAvailableMinutes] = useState(30);
   const [rewardPreference, setRewardPreference] = useState<"cashback" | "discount" | "either">("cashback");
+  const [locationMode, setLocationMode] = useState<"real_browser_location" | "demo_geofence_fallback">("demo_geofence_fallback");
+  const autoStarted = useRef(false);
 
   async function load() {
     const next = await apiGet<ConsumerState>("/api/consumer/state?userId=user_mia");
@@ -35,22 +38,42 @@ export function WalletApp() {
   }
 
   useEffect(() => {
-    load().catch(console.error);
+    if (autoStarted.current) return;
+    autoStarted.current = true;
+    bootstrap().catch(console.error);
+    // Auto orchestration should run once on wallet mount; idempotency handles remount duplicates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function findOffer() {
+  async function bootstrap() {
+    await load();
+    await runContextPipeline("WalletOpened", true);
+  }
+
+  async function runContextPipeline(eventType: "WalletOpened" | "UserDeclaredContextChanged" | "UserEnteredZone", preferRealLocation: boolean) {
     setBusy(true);
+    setApiError(null);
     try {
+      const location = preferRealLocation ? await resolveBrowserLocation() : null;
+      setLocationMode(location ? "real_browser_location" : "demo_geofence_fallback");
       const result = await orchestrate({
         userId: "user_mia",
-        eventType: "UserDeclaredContextChanged",
+        eventType,
+        location: location ?? undefined,
         declaredContext: { intent: declaredIntent, availableMinutes, rewardPreference },
       });
       setLastRun(result);
       await load();
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reach City Wallet API.");
+      console.error(error);
     } finally {
       setBusy(false);
     }
+  }
+
+  async function findOffer() {
+    await runContextPipeline("UserDeclaredContextChanged", true);
   }
 
   async function claim(offerId: string) {
@@ -67,6 +90,8 @@ export function WalletApp() {
   const profile = state?.profile;
   const context = lastRun?.consumerContext ?? state?.context;
   const reasoning = lastRun?.negotiationDecision?.reasoning ?? offer?.why ?? [];
+  const activeLocationMode = context?.locationMode ?? locationMode;
+  const activeWeatherSource = context?.weatherSource ?? "mock_weather_fallback";
 
   return (
     <Section>
@@ -77,11 +102,15 @@ export function WalletApp() {
               <div className="flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-paper font-serif italic text-teal">
                 {profile?.displayName?.[0] ?? "M"}
               </div>
-              <ProviderBadge label={context?.zoneId ?? "loading"} tone="green" />
+              <ProviderBadge label={context?.zoneName ?? context?.zoneId ?? "loading"} tone="green" />
             </div>
             <p className="mb-1 text-sm font-medium text-ink-muted">Hello, {profile?.displayName ?? "Mia"}</p>
             <h1 className="font-serif text-3xl font-medium tracking-tight">€1,482.90</h1>
             <p className="mt-2 font-mono text-xs text-ink-muted">{context?.weatherDescription ?? "loading context"} · {context?.timeContext ?? "time"}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Badge tone={activeLocationMode === "real_browser_location" ? "green" : "blue"}>{activeLocationMode === "real_browser_location" ? "Real browser location" : "Demo geofence fallback"}</Badge>
+              <Badge tone={activeWeatherSource === "live_weather" ? "green" : "blue"}>{activeWeatherSource === "live_weather" ? "Live weather" : "Mock weather fallback"}</Badge>
+            </div>
           </div>
 
           <div className="surface-paper flex flex-1 flex-col gap-5 overflow-y-auto rounded-t-[2rem] px-5 py-7">
@@ -95,7 +124,7 @@ export function WalletApp() {
                 <Sparkles className="mx-auto mb-3 text-teal" size={20} />
                 <p className="mb-2 font-serif text-lg">Find a relevant local offer</p>
                 <p className="mb-4 text-sm text-ink-muted">The wallet sends a user-side event to the API Gateway. Services decide whether an offer is useful enough to show.</p>
-                <Button onClick={findOffer}>Find relevant offer</Button>
+                <Button onClick={findOffer}><RefreshCw size={16} /> Refresh context</Button>
               </div>
             ) : null}
 
@@ -120,8 +149,22 @@ export function WalletApp() {
               </div>
               <h2 className="font-serif text-2xl font-medium">Context Event</h2>
             </div>
-            <Button onClick={findOffer} disabled={busy}>{busy ? "Finding..." : "Find relevant offer"}</Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="secondary" onClick={() => runContextPipeline("WalletOpened", true)} disabled={busy}>
+                <MapPin size={16} /> Use my real location
+              </Button>
+              <Button onClick={findOffer} disabled={busy}>
+                <RefreshCw size={16} /> {busy ? "Refreshing..." : "Refresh context"}
+              </Button>
+            </div>
           </div>
+
+          {apiError ? (
+            <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
+              <div className="mb-1 font-semibold">API connection failed</div>
+              <p>{apiError}</p>
+            </div>
+          ) : null}
 
           <div className="grid gap-4 md:grid-cols-3">
             <label className="surface-card rounded-2xl p-4 text-sm">
@@ -152,21 +195,39 @@ export function WalletApp() {
                 <Badge tone="green">context</Badge>
                 <dl className="mt-4 grid grid-cols-2 gap-4 text-sm">
                   <div><dt className="text-ink-muted">Weather</dt><dd>{context?.weatherDescription ?? "-"}</dd></div>
+                  <div><dt className="text-ink-muted">Weather source</dt><dd>{activeWeatherSource === "live_weather" ? "Live weather" : "Mock fallback"}</dd></div>
+                  <div><dt className="text-ink-muted">Area</dt><dd>{context?.zoneName ?? context?.zoneId ?? "-"}</dd></div>
+                  <div><dt className="text-ink-muted">Location</dt><dd>{activeLocationMode === "real_browser_location" ? "Real browser location" : "Demo geofence fallback"}</dd></div>
+                  <div><dt className="text-ink-muted">Nearby eligible merchants</dt><dd>{lastRun?.nearbyMerchantSearch?.eligibleMerchantCount ?? "-"}</dd></div>
+                  <div><dt className="text-ink-muted">Search radius</dt><dd>{lastRun?.nearbyMerchantSearch?.radiusUsedMeters ? `${lastRun.nearbyMerchantSearch.radiusUsedMeters}m${lastRun.nearbyMerchantSearch.expanded ? " expanded" : ""}` : "-"}</dd></div>
                   <div><dt className="text-ink-muted">Time</dt><dd>{context?.timeContext ?? "-"}</dd></div>
                   <div><dt className="text-ink-muted">Walk</dt><dd>{context?.walkingToleranceMeters ?? "-"}m</dd></div>
                   <div><dt className="text-ink-muted">Offers/hour</dt><dd>{context?.maxOffersPerHour ?? "-"}</dd></div>
+                  {lastRun?.reason ? <div><dt className="text-ink-muted">Run status</dt><dd>{lastRun.reason}</dd></div> : null}
                 </dl>
               </div>
 
-              {offer ? (
+              {offer || lastRun ? (
                 <ExplainabilityPanel title="Why this offer?">
                   <div className="space-y-4">
-                    <ol className="space-y-2">
-                      {reasoning.map((line, index) => <li key={line} className="flex gap-3"><span className="font-mono text-xs text-ink-muted">{String(index + 1).padStart(2, "0")}</span><span>{line}</span></li>)}
-                    </ol>
+                    {reasoning.length > 0 ? (
+                      <ol className="space-y-2">
+                        {reasoning.map((line, index) => <li key={line} className="flex gap-3"><span className="font-mono text-xs text-ink-muted">{String(index + 1).padStart(2, "0")}</span><span>{line}</span></li>)}
+                      </ol>
+                    ) : <p>{lastRun?.reason ? `No new negotiation: ${lastRun.reason}.` : "Context assembled; waiting for a matching trigger."}</p>}
                     <div className="grid gap-3 lg:grid-cols-2">
                       <MiniJson title="Trigger" data={lastRun?.matchedTriggers ?? []} />
-                      <MiniJson title="Context" data={context} />
+                      <MiniJson title="Context + Provider Sources" data={{
+                        zone: context?.zoneName ?? context?.zoneId,
+                        locationMode: context?.locationMode,
+                        rawCoordinatesDeveloperOnly: context?.userLocation,
+                        geofenceMatched: context?.geofenceMatched,
+                        matchedZones: context?.matchedZones,
+                        weatherSource: context?.weatherSource,
+                        providerBudget: context?.providerBudget ?? lastRun?.providerBudget,
+                        providerFallbacks: context?.providerFallbacks,
+                        nearbyMerchantSearch: lastRun?.nearbyMerchantSearch,
+                      }} />
                       <MiniJson title="Brief" data={lastRun?.negotiationBrief ?? null} />
                       <MiniJson title="Decision" data={lastRun?.negotiationDecision ?? null} />
                       <MiniJson title="Validation" data={lastRun?.validationResult ?? null} />
@@ -196,6 +257,22 @@ export function WalletApp() {
       </div>
     </Section>
   );
+}
+
+function resolveBrowserLocation(): Promise<{ latitude: number; longitude: number; accuracyMeters?: number; source: "browser" } | null> {
+  if (typeof navigator === "undefined" || !navigator.geolocation) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => resolve({
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        accuracyMeters: position.coords.accuracy,
+        source: "browser",
+      }),
+      () => resolve(null),
+      { enableHighAccuracy: true, timeout: 3_000, maximumAge: 60_000 },
+    );
+  });
 }
 
 function MiniJson({ title, data }: { title: string; data: unknown }) {

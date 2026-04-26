@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEventV2 } from "aws-lambda";
 import { buildConsumerActivityTimeline, buildMerchantDashboardMetrics, recordAnalyticsEvent } from "@city-wallet/analytics-domain";
+import { MerchantDashboardQuerySchema } from "@city-wallet/contracts";
 import { getRepository } from "@city-wallet/db";
 
 export async function handler(event: APIGatewayProxyEventV2) {
@@ -7,7 +8,9 @@ export async function handler(event: APIGatewayProxyEventV2) {
   const method = event.requestContext.http.method;
   if (method === "POST" && event.rawPath === "/api/events") return response(200, await recordAnalyticsEvent(repository, parse(event)));
   if (method === "GET" && event.rawPath === "/api/events") return response(200, await repository.listAnalyticsEvents(100));
-  if (method === "GET" && event.rawPath === "/api/merchant-dashboard") return response(200, await buildMerchantDashboardMetrics(repository));
+  if (method === "GET" && event.rawPath === "/api/merchant-dashboard") {
+    return response(200, await buildMerchantDashboardMetrics(repository, MerchantDashboardQuerySchema.parse(event.queryStringParameters ?? {})));
+  }
   if (method === "GET" && event.rawPath === "/api/consumer-timeline") return response(200, await buildConsumerActivityTimeline(repository));
   return response(404, { error: "not found" });
 }

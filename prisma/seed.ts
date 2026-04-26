@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import {
+  seededCommerceZones,
   seededConsumerContext,
   seededMerchantGoals,
   seededMerchantProducts,
@@ -17,6 +18,10 @@ function data(value: unknown) {
 
 async function main() {
   await prisma.$transaction([
+    prisma.orchestrationRun.deleteMany(),
+    prisma.merchantImportRun.deleteMany(),
+    prisma.poiDiscoveryCache.deleteMany(),
+    prisma.geocodingCache.deleteMany(),
     prisma.debugRun.deleteMany(),
     prisma.analyticsEvent.deleteMany(),
     prisma.cashbackLedgerEntry.deleteMany(),
@@ -36,10 +41,27 @@ async function main() {
     prisma.merchantGoal.deleteMany(),
     prisma.merchantProduct.deleteMany(),
     prisma.merchant.deleteMany(),
+    prisma.commerceZone.deleteMany(),
     prisma.userContextSnapshot.deleteMany(),
     prisma.userProfile.deleteMany(),
     prisma.user.deleteMany(),
   ]);
+
+  for (const zone of seededCommerceZones) {
+    await prisma.commerceZone.create({
+      data: {
+        id: zone.id,
+        name: zone.name,
+        city: zone.city,
+        country: zone.country,
+        centerLat: zone.centerLat,
+        centerLng: zone.centerLng,
+        radiusMeters: zone.radiusMeters,
+        isActive: zone.isActive,
+        data: data(zone),
+      },
+    });
+  }
 
   await prisma.user.create({ data: { id: seededUserProfile.userId } });
   await prisma.userProfile.create({
@@ -61,6 +83,13 @@ async function main() {
     await prisma.merchant.create({
       data: {
         id: merchant.id,
+        name: merchant.name,
+        zoneId: merchant.zoneId,
+        category: merchant.category,
+        participationStatus: merchant.participationStatus ?? "partner",
+        source: merchant.source ?? "seeded",
+        latitude: merchant.latitude,
+        longitude: merchant.longitude,
         data: data(merchant),
       },
     });

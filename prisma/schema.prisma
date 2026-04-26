@@ -37,13 +37,39 @@ model UserContextSnapshot {
 }
 
 model Merchant {
-  id        String   @id
-  data      String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  products  MerchantProduct[]
-  goals     MerchantGoal[]
-  rule      MerchantRule?
+  id                  String   @id
+  name                String   @default("")
+  zoneId              String   @default("")
+  category            String   @default("")
+  participationStatus String   @default("partner")
+  source              String   @default("seeded")
+  latitude            Float?
+  longitude           Float?
+  data                String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  products            MerchantProduct[]
+  goals               MerchantGoal[]
+  rule                MerchantRule?
+
+  @@index([zoneId])
+  @@index([category])
+  @@index([participationStatus])
+  @@index([source])
+}
+
+model CommerceZone {
+  id           String   @id
+  name         String
+  city         String
+  country      String
+  centerLat    Float
+  centerLng    Float
+  radiusMeters Int
+  data         String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 }
 
 model MerchantProduct {
@@ -192,4 +218,64 @@ model DebugRun {
   id        String   @id
   data      String
   createdAt DateTime @default(now())
+}
+
+model GeocodingCache {
+  id        String   @id
+  provider  String
+  query     String
+  resultJson String?
+  status    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([provider, query])
+}
+
+model PoiDiscoveryCache {
+  id        String   @id
+  provider  String
+  cacheKey  String
+  resultJson String
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+
+  @@unique([provider, cacheKey])
+}
+
+model MerchantImportRun {
+  id                    String   @id
+  zoneId                String
+  status                String
+  requestedRadiusMeters Int
+  radiusMeters          Int
+  categoriesJson        String
+  categoryCapsJson      String
+  maxImportedMerchants  Int
+  maxTilesPerRun        Int
+  importedCount         Int      @default(0)
+  demoPartnerCount      Int      @default(0)
+  failedCount           Int      @default(0)
+  continuationCursor    String?
+  warningsJson          String
+  errorJson             String?
+  providerStatsJson     String
+  startedAt             DateTime @default(now())
+  completedAt           DateTime?
+  updatedAt             DateTime @updatedAt
+
+  @@index([zoneId, startedAt])
+  @@index([status])
+}
+
+model OrchestrationRun {
+  idempotencyKey String   @id
+  userId         String
+  eventType      String
+  contextSnapshotId String?
+  status         String
+  resultJson     String?
+  errorJson      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
