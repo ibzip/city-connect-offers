@@ -69,7 +69,7 @@ export class AzureOpenAIJsonAgentClient implements JsonAgentClient {
       deployment,
       apiKey,
       apiVersion,
-      defaultTimeoutMs: config?.defaultTimeoutMs ?? Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 15_000),
+      defaultTimeoutMs: config?.defaultTimeoutMs ?? Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 45_000),
       fetchImpl: config?.fetchImpl ?? fetch,
     };
   }

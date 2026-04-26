@@ -9,6 +9,7 @@ import {
   seededPaymentDensitySignals,
   seededUserProfile,
 } from "@city-wallet/data-seed";
+import { getScenarioPreset } from "@city-wallet/raw-context-domain";
 
 const prisma = new PrismaClient();
 
@@ -17,65 +18,9 @@ function data(value: unknown) {
 }
 
 const DEFAULT_MOCK_PROFILE_ID = "mock_profile_default_mia";
+const DEFAULT_MOCK_PROFILE_LEGACY_ID = "mock_profile_workday_mia_v1";
 
-const DEFAULT_MOCK_PROFILE_ENABLED_SOURCES = {
-  calendar: true,
-  fitness: true,
-  mobility: true,
-  mood: true,
-  payment_preference: true,
-  social: false,
-  transit: false,
-  dietary: true,
-  device_attention: true,
-  local_events: false,
-};
-
-const DEFAULT_MOCK_PROFILE_PAYLOADS = {
-  calendar: {
-    freeWindowMinutes: 35,
-    nextEventInMinutes: 95,
-    nextEventType: "work",
-    dayLoad: "medium",
-    hasHardStop: true,
-    locationHint: "nearby",
-  },
-  fitness: {
-    sleepQuality: "okay",
-    energyLevel: "medium",
-    recentWorkout: false,
-    recoveryNeed: "low",
-    activityLoadToday: "low",
-  },
-  mobility: {
-    movementState: "walking_slowly",
-    dwellPattern: "browsing",
-    familiarity: "familiar_area",
-  },
-  mood: {
-    moodState: "calm",
-    confidence: 0.7,
-    basis: ["light_calendar_load", "okay_sleep"],
-  },
-  payment_preference: {
-    rewardPreference: "cashback",
-    priceSensitivity: "medium",
-    categoryAffinities: ["cafe", "bakery", "bookshop"],
-    recentCategoryAvoidance: [],
-  },
-  dietary: {
-    dietaryHints: [],
-    avoidFoodCategories: [],
-    preferredFoodStyle: "light",
-  },
-  device_attention: {
-    screenActive: true,
-    focusMode: false,
-    batteryLevel: "medium",
-    headphonesConnected: false,
-    notificationTolerance: "medium",
-  },
-};
+const ACTIVE_DEFAULT_SCENARIO = "lunch_break_with_visitor" as const;
 
 /**
  * Idempotent seeding: upserts the canonical seed rows by primary key without
@@ -242,27 +187,52 @@ export async function seedIdempotent(client: PrismaClient = prisma) {
     }
   }
 
+  // Make the lunch + visitor scenario the default active mock profile for
+  // Mia, so opening the wallet on a fresh DB demonstrates the multi-offer
+  // flow described in the product brief. Any other rows that were marked
+  // active (e.g. from prior dev sessions) are flipped to inactive to satisfy
+  // the "single active profile per user" invariant.
+  const preset = getScenarioPreset(ACTIVE_DEFAULT_SCENARIO);
+  if (!preset) {
+    throw new Error(`Missing scenario preset "${ACTIVE_DEFAULT_SCENARIO}" - cannot seed default profile.`);
+  }
+
+  await client.mockContextProfile.updateMany({
+    where: {
+      userId: seededUserProfile.userId,
+      isActive: true,
+      NOT: { id: DEFAULT_MOCK_PROFILE_ID },
+    },
+    data: { isActive: false },
+  });
+
   await client.mockContextProfile.upsert({
     where: { id: DEFAULT_MOCK_PROFILE_ID },
     update: {
       userId: seededUserProfile.userId,
-      name: "Default workday afternoon",
-      enabledSourcesJson: data(DEFAULT_MOCK_PROFILE_ENABLED_SOURCES),
-      signalPayloadsJson: data(DEFAULT_MOCK_PROFILE_PAYLOADS),
-      activeScenario: null,
+      name: preset.label,
+      enabledSourcesJson: data(preset.enabledSources),
+      signalPayloadsJson: data(preset.signalPayloads),
+      profileOverridesJson: preset.profileOverrides ? data(preset.profileOverrides) : null,
+      activeScenario: preset.id,
       isActive: true,
     },
     create: {
       id: DEFAULT_MOCK_PROFILE_ID,
       userId: seededUserProfile.userId,
-      name: "Default workday afternoon",
-      enabledSourcesJson: data(DEFAULT_MOCK_PROFILE_ENABLED_SOURCES),
-      signalPayloadsJson: data(DEFAULT_MOCK_PROFILE_PAYLOADS),
-      activeScenario: null,
+      name: preset.label,
+      enabledSourcesJson: data(preset.enabledSources),
+      signalPayloadsJson: data(preset.signalPayloads),
+      profileOverridesJson: preset.profileOverrides ? data(preset.profileOverrides) : null,
+      activeScenario: preset.id,
       isActive: true,
       version: 1,
     },
   });
+
+  // Best-effort cleanup of an older default id used in earlier dev branches,
+  // so we never end up with two "default" rows competing.
+  await client.mockContextProfile.deleteMany({ where: { id: DEFAULT_MOCK_PROFILE_LEGACY_ID } });
 }
 
 /**

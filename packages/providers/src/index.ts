@@ -17,7 +17,7 @@ export interface LocationPayload {
   latitude?: number;
   longitude?: number;
   accuracyMeters?: number;
-  mode: "real_browser_location" | "demo_geofence_fallback";
+  mode: "real_browser_location" | "demo_geofence_fallback" | "no_location";
 }
 
 export interface UserContextPayload {
@@ -68,8 +68,15 @@ export interface GeocodingCache {
   set(provider: string, query: string, result: GeoPoint | null, status: string): Promise<void>;
 }
 
+export interface ReverseGeocodeResult {
+  city?: string;
+  countryCode?: string;
+  displayName?: string;
+}
+
 export interface GeocodingProvider {
   geocode(query: string, options: { budget: ProviderBudget; cache?: GeocodingCache }): Promise<GeoPoint | null>;
+  reverseGeocode?(input: { latitude: number; longitude: number }, options: { budget: ProviderBudget; cache?: GeocodingCache }): Promise<ReverseGeocodeResult | null>;
 }
 
 export interface POIProvider {
@@ -179,12 +186,19 @@ export class DemoGeofenceProvider implements LocationProvider {
   }
 }
 
+/**
+ * Browser-first location provider. If no live coordinates are supplied (the
+ * user has not granted location yet), we explicitly emit a `no_location`
+ * payload instead of silently falling back to a demo geofence. The wallet UI
+ * is responsible for prompting the user to grant location.
+ */
 export class BrowserLocationInputProvider implements LocationProvider {
-  constructor(private readonly fallback = new DemoGeofenceProvider()) {}
-
-  async getLocation(userId: string, input?: { latitude?: number; longitude?: number; accuracyMeters?: number; source?: "browser" | "demo_geofence" }) {
+  async getLocation(_userId: string, input?: { latitude?: number; longitude?: number; accuracyMeters?: number; source?: "browser" | "demo_geofence" }) {
     if (input?.latitude === undefined || input.longitude === undefined) {
-      return this.fallback.getLocation(userId);
+      return signal("no_location", {
+        zoneId: "no_location",
+        mode: "no_location" as const,
+      }, "simulated", 0.0);
     }
     return signal("browser_location", {
       zoneId: "outside_activated_city_wallet_area",
@@ -272,6 +286,68 @@ export class OpenStreetMapNominatimGeocodingProvider implements GeocodingProvide
     } catch (error) {
       recordFallback(options.budget, "nominatim", error instanceof Error ? error.message : "nominatim_failed");
       await options.cache?.set("nominatim", normalizedQuery, null, "failed");
+      return null;
+    }
+  }
+
+  async reverseGeocode(input: { latitude: number; longitude: number }, options: { budget: ProviderBudget; cache?: GeocodingCache }) {
+    const cacheQuery = `reverse:${roundCoordinate(input.latitude, 3)},${roundCoordinate(input.longitude, 3)}`;
+    const cached = await options.cache?.get("nominatim", cacheQuery);
+    if (cached && shouldUseCachedGeocode(cached) && cached.result) {
+      const cachedAny = cached.result as unknown as ReverseGeocodeResult & GeoPoint;
+      if (cachedAny.city || cachedAny.countryCode || cachedAny.displayName) {
+        return {
+          city: cachedAny.city,
+          countryCode: cachedAny.countryCode,
+          displayName: cachedAny.displayName,
+        };
+      }
+    }
+    if (!consumeBudget(options.budget, "nominatimAttemptsRemaining")) {
+      recordFallback(options.budget, "nominatim", "provider_budget_exceeded");
+      return null;
+    }
+    const minIntervalMs = 1_100;
+    const waitMs = Math.max(0, this.lastCallAt + minIntervalMs - Date.now());
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    this.lastCallAt = Date.now();
+    try {
+      const url = new URL("https://nominatim.openstreetmap.org/reverse");
+      url.searchParams.set("lat", String(input.latitude));
+      url.searchParams.set("lon", String(input.longitude));
+      url.searchParams.set("format", "jsonv2");
+      url.searchParams.set("zoom", "13");
+      const response = await withTimeout(fetch(url, {
+        headers: {
+          "user-agent": process.env.NOMINATIM_USER_AGENT || "CityWalletHackathonMVP/0.1 local-dev",
+          "accept": "application/json",
+        },
+      }), 3_000, "Nominatim reverse request");
+      if (!response.ok) throw new Error(`Nominatim reverse ${response.status}`);
+      const body = await response.json() as {
+        display_name?: string;
+        address?: { city?: string; town?: string; village?: string; municipality?: string; suburb?: string; county?: string; country_code?: string };
+      };
+      const address = body.address ?? {};
+      const city = address.city ?? address.town ?? address.village ?? address.municipality ?? address.suburb ?? address.county;
+      const countryCode = address.country_code?.toUpperCase();
+      const result: ReverseGeocodeResult = {
+        city,
+        countryCode,
+        displayName: body.display_name,
+      };
+      // We co-opt the existing geocoding cache to memoise the place name; the
+      // shape contains a few extra fields beyond GeoPoint but that's fine for
+      // local dev.
+      await options.cache?.set(
+        "nominatim",
+        cacheQuery,
+        result as unknown as GeoPoint,
+        result.city || result.countryCode ? "hit" : "not_found",
+      );
+      return result;
+    } catch (error) {
+      recordFallback(options.budget, "nominatim", error instanceof Error ? error.message : "nominatim_reverse_failed");
       return null;
     }
   }

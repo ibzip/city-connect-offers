@@ -9,6 +9,17 @@ globalThis.fetch = async () => {
   throw new Error("forced provider failure in tests");
 };
 
+// Fixed test coordinates inside the seeded "Stuttgart Old Town" zone so the
+// orchestrator's no_location short-circuit (introduced with the
+// LunchBreakNotificationClicked flow) is bypassed in unit tests. Real
+// production traffic only flows once the consumer wallet hands us live
+// browser geolocation.
+const TEST_LOCATION = {
+  latitude: 48.775845,
+  longitude: 9.177544,
+  source: "browser" as const,
+};
+
 function setup() {
   const repository = new SeededRepository();
   setRepositoryForTests(repository);
@@ -56,8 +67,18 @@ function makeEvent(method: string, fullPath: string, body?: unknown): APIGateway
 
 test("completed idempotency key returns stored result without duplicate offers", async () => {
   const repository = setup();
-  const first = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_complete" });
-  const second = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_complete" });
+  const first = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_complete",
+    location: TEST_LOCATION,
+  });
+  const second = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_complete",
+    location: TEST_LOCATION,
+  });
   assert.equal(first.offer?.offerId, second.offer?.offerId);
   assert.equal((await repository.listOffers("user_mia")).length, 1);
 });
@@ -97,22 +118,42 @@ test("stale running duplicate is marked failed and not reused", async () => {
 
 test("active offer and cooldown block duplicate negotiation paths", async () => {
   const repository = setup();
-  const first = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_offer" });
+  const first = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_offer",
+    location: TEST_LOCATION,
+  });
   assert.ok(first.offer);
-  const active = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_active" });
+  const active = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_active",
+    location: TEST_LOCATION,
+  });
   assert.equal(active.reason, "active_offer_exists");
 
   const tokens = await createRedemptionTokens(repository, first.offer.offerId);
   await redeemToken(repository, { code: tokens[0]!.code, merchantId: tokens[0]!.merchantId });
   await redeemToken(repository, { code: tokens[1]!.code, merchantId: tokens[1]!.merchantId });
-  const cooldown = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_cooldown" });
+  const cooldown = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_cooldown",
+    location: TEST_LOCATION,
+  });
   assert.equal(cooldown.reason, "cooldown_active");
 });
 
 test("wallet orchestration uses stored merchants without live discovery by default", async () => {
   setup();
   process.env.ENABLE_WALLET_LIVE_DISCOVERY_FALLBACK = "false";
-  const result = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_stored_supply" });
+  const result = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_stored_supply",
+    location: TEST_LOCATION,
+  });
   assert.equal(result.nearbyMerchantSearch?.source, "stored_db");
   assert.equal(result.providerBudget?.overpassRequestsRemaining, 1);
   assert.equal(result.providerBudget?.tavilyRequestsRemaining, 1);
@@ -157,7 +198,12 @@ test("orchestrator is NOT halted in mock_llm mode (assembler+negotiator skipped,
   delete process.env.AZURE_OPENAI_ENDPOINT;
   delete process.env.AZURE_OPENAI_DEPLOYMENT;
   delete process.env.AZURE_OPENAI_API_KEY;
-  const result = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_mock_llm_skip" });
+  const result = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_mock_llm_skip",
+    location: TEST_LOCATION,
+  });
   assert.equal(result.assembledUserContext, null);
   assert.equal(result.userNegotiationPosition, null);
   assert.notEqual(result.reason, "agent_failed");
@@ -170,7 +216,12 @@ test("orchestrator halts with no_offer when LLM_PROVIDER=azure_openai but Azure 
   delete process.env.AZURE_OPENAI_DEPLOYMENT;
   delete process.env.AZURE_OPENAI_API_KEY;
   delete process.env.AZURE_OPENAI_API_VERSION;
-  const result = await orchestrate({ userId: "user_mia", eventType: "WalletOpened", idempotencyKey: "idem_azure_strict_no_config" });
+  const result = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_azure_strict_no_config",
+    location: TEST_LOCATION,
+  });
   assert.ok(!result.offer, "no offer should be issued when Azure is required but unconfigured");
   assert.ok(result.noOfferReason === "agent_failed" || result.noOfferReason === "agent_skipped");
   process.env.LLM_PROVIDER = "mock_llm";
@@ -207,6 +258,7 @@ test("active mock profile profileOverrides widen the consumer context the orches
     userId: "user_mia",
     eventType: "WalletOpened",
     idempotencyKey: "idem_tourist_overrides",
+    location: TEST_LOCATION,
   });
 
   const ctx = result.consumerContext;
@@ -220,4 +272,101 @@ test("active mock profile profileOverrides widen the consumer context the orches
   // The persisted UserProfile must NOT be mutated by the override.
   const persistedAfter = await repository.getUserProfile("user_mia");
   assert.equal(persistedAfter?.walkingToleranceMeters, baselineWalk);
+});
+
+test("orchestrator short-circuits with location_required when no live coordinates are provided", async () => {
+  setup();
+  // Intentionally omit `location` to mirror what the wallet sends before the
+  // user clicks "Time for your lunch break" (i.e. before the geolocation
+  // permission prompt resolves).
+  const result = await orchestrate({
+    userId: "user_mia",
+    eventType: "WalletOpened",
+    idempotencyKey: "idem_no_location",
+  });
+  assert.equal(result.triggered, false);
+  assert.equal(result.noOfferReason, "location_required");
+  assert.ok(!result.offer, "no offer should be emitted when location is missing");
+  assert.equal(result.consumerContext?.locationMode, "no_location");
+});
+
+test("POST /api/offers/:id/reject marks the offer dismissed and records analytics", async () => {
+  const repository = setup();
+  // Seed an offer so we have a known target.
+  const now = new Date();
+  await repository.saveOffer({
+    offerId: "offer_to_reject",
+    consumerId: "user_mia",
+    type: "single_offer",
+    status: "created",
+    headline: "Test offer",
+    subheadline: "Test",
+    cta: "Claim",
+    validityMinutes: 30,
+    expiresAt: new Date(now.getTime() + 30 * 60 * 1000).toISOString(),
+    createdAt: now.toISOString(),
+    items: [],
+    why: [],
+  });
+  const beforeAnalytics = (await repository.listAnalyticsEvents(1000)).length;
+
+  const resp = await handler(makeEvent("POST", "/api/offers/offer_to_reject/reject", {}));
+  assert.equal((resp as { statusCode: number }).statusCode, 200);
+
+  const updated = await repository.getOffer("offer_to_reject");
+  assert.equal(updated?.status, "dismissed");
+
+  const afterAnalytics = await repository.listAnalyticsEvents(1000);
+  assert.ok(
+    afterAnalytics.some((event) => event.type === "offer_rejected"),
+    "expected an offer_rejected analytics event after rejection",
+  );
+  assert.ok(afterAnalytics.length > beforeAnalytics);
+});
+
+test("POST /api/consumer/reset clears transient user state and records analytics", async () => {
+  const repository = setup();
+  // Seed two offers + a user event for user_mia + one offer for user_bob to
+  // assert the reset is per-user.
+  const now = new Date().toISOString();
+  await repository.saveOffer({
+    offerId: "offer_reset_a1",
+    consumerId: "user_mia",
+    type: "single_offer",
+    status: "created",
+    headline: "A",
+    subheadline: "B",
+    cta: "Claim",
+    validityMinutes: 30,
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    createdAt: now,
+    items: [],
+    why: [],
+  });
+  await repository.saveOffer({
+    offerId: "offer_reset_b1",
+    consumerId: "user_bob",
+    type: "single_offer",
+    status: "created",
+    headline: "A",
+    subheadline: "B",
+    cta: "Claim",
+    validityMinutes: 30,
+    expiresAt: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+    createdAt: now,
+    items: [],
+    why: [],
+  });
+
+  const resp = await handler(makeEvent("POST", "/api/consumer/reset", { userId: "user_mia" }));
+  assert.equal((resp as { statusCode: number }).statusCode, 200);
+
+  assert.equal((await repository.listOffers("user_mia")).length, 0);
+  assert.equal((await repository.listOffers("user_bob")).length, 1, "other users must not be affected by reset");
+
+  const analytics = await repository.listAnalyticsEvents(1000);
+  assert.ok(
+    analytics.some((event) => event.type === "user_state_cleared"),
+    "expected user_state_cleared analytics event after reset",
+  );
 });

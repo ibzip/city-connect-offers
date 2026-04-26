@@ -525,6 +525,73 @@ export const scenarioPresets: ScenarioPreset[] = [
       dietary: { dietaryHints: [], avoidFoodCategories: [], preferredFoodStyle: "unknown" },
     },
   },
+  {
+    id: "lunch_break_with_visitor",
+    label: "Lunch break + visitor in an hour",
+    description:
+      "User is taking a lunch break right now AND a friend is arriving in about an hour, so a small gift stop makes sense alongside lunch.",
+    profileOverrides: {
+      walkingToleranceMeters: 900,
+      maxBundleStops: 2,
+      maxOffersPerHour: 2,
+      rewardPreference: "either",
+      privacyMode: "medium",
+      declaredIntent: "lunch_break_with_visitor",
+      availableMinutes: 55,
+    },
+    enabledSources: {
+      calendar: true,
+      mood: true,
+      mobility: true,
+      payment_preference: true,
+      device_attention: true,
+      social: true,
+      dietary: true,
+      fitness: false,
+      transit: false,
+      local_events: false,
+    },
+    signalPayloads: {
+      calendar: {
+        freeWindowMinutes: 55,
+        nextEventInMinutes: 60,
+        nextEventType: "social",
+        dayLoad: "medium",
+        hasHardStop: true,
+        locationHint: "nearby",
+      },
+      mood: {
+        moodState: "social",
+        confidence: 0.8,
+        basis: ["scheduled_lunch", "incoming_visitor"],
+      },
+      mobility: { movementState: "walking_slowly", dwellPattern: "browsing", familiarity: "familiar_area" },
+      payment_preference: {
+        rewardPreference: "discovery",
+        priceSensitivity: "medium",
+        categoryAffinities: ["cafe", "restaurant", "bakery", "flower_shop", "gift_shop"],
+        recentCategoryAvoidance: [],
+      },
+      device_attention: {
+        screenActive: true,
+        focusMode: false,
+        batteryLevel: "high",
+        headphonesConnected: false,
+        notificationTolerance: "high",
+      },
+      social: {
+        socialMode: "friend_visiting",
+        groupSize: 2,
+        nextSocialCommitmentInMinutes: 60,
+        visitorContext: {
+          arrivingInMinutes: 60,
+          relation: "close_friend",
+          suggestedGiftCategories: ["flower_shop", "bakery", "gift_shop", "bookshop"],
+        },
+      },
+      dietary: { dietaryHints: [], avoidFoodCategories: [], preferredFoodStyle: "light" },
+    },
+  },
 ];
 
 export function getScenarioPreset(id: MockContextScenario): ScenarioPreset | undefined {

@@ -263,6 +263,38 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       return json(200, { tokens, analyticsEvents });
     }
 
+    const rejectMatch = path.match(/^\/api\/offers\/([^/]+)\/reject$/);
+    if (method === "POST" && rejectMatch) {
+      const offerId = rejectMatch[1]!;
+      const repository = getRepository();
+      const updated = await repository.updateOfferStatus(offerId, "dismissed");
+      if (!updated) return json(404, { error: `No offer ${offerId}` });
+      const clients = makeClients();
+      await clients.analytics.record({
+        type: "offer_rejected",
+        layer: "offer",
+        offerId,
+        message: `Offer ${offerId} rejected by user.`,
+        payload: { offerId },
+      });
+      return json(200, { ok: true, offer: updated });
+    }
+
+    if (method === "POST" && path === "/api/consumer/reset") {
+      const body = (readJson(event) as { userId?: string }) ?? {};
+      const userId = body.userId ?? event.queryStringParameters?.userId ?? "user_mia";
+      const repository = getRepository();
+      const cleared = await repository.clearUserTransientState(userId);
+      const clients = makeClients();
+      await clients.analytics.record({
+        type: "user_state_cleared",
+        layer: "config",
+        message: `Transient state cleared for ${userId}.`,
+        payload: cleared,
+      });
+      return json(200, { ok: true, userId, ...cleared });
+    }
+
     if (method === "POST" && path === "/api/redemption/redeem") {
       const input = RedeemTokenRequestSchema.parse(readJson(event));
       const clients = makeClients();
@@ -446,6 +478,40 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       providerBudget,
     });
     await repository.updateOrchestrationRun(idempotencyKey, { contextSnapshotId: consumerContext.snapshotId });
+
+    // The user has not granted live location yet. The wallet is responsible
+    // for prompting (e.g. via the lunch-break notification CTA). Short-circuit
+    // the pipeline with a clear `location_required` reason so the UI can
+    // render the right state without surfacing offers built on stale fallback
+    // data.
+    if (consumerContext.locationMode === "no_location") {
+      analyticsEvents.push(await clients.analytics.record({
+        type: "no_offer_emitted",
+        layer: "context",
+        message: "Halting orchestration with no_offer (location_required).",
+        payload: { reason: "location_required" },
+      }));
+      return completeRun({
+        repository,
+        idempotencyKey,
+        result: {
+          triggered: false,
+          reason: "no_trigger_matched",
+          idempotencyKey,
+          orchestrationStatus: "completed",
+          matchedTriggers: [],
+          consumerContext,
+          merchantInsights: [],
+          candidateMerchants: [],
+          bundleCandidates: [],
+          analyticsEvents,
+          providerBudget,
+          discoveredMerchants: [],
+          offers: [],
+          noOfferReason: "location_required",
+        },
+      });
+    }
 
     const eventPayload = {
       ...(input.declaredContext ?? {}),
@@ -796,42 +862,110 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
       payload: negotiation.negotiationDecision,
     }));
 
-    const validationResult = await clients.validation.validate({
-      decision: negotiation.negotiationDecision,
-      merchants,
-      context: negotiationContext,
-    });
-    await repository.saveValidationResult(makeId("validation"), decisionId, validationResult);
-    analyticsEvents.push(await clients.analytics.record({
-      type: "offer_validated",
-      layer: "validation",
-      message: validationResult.valid ? "Offer decision passed validators." : `Validation failed: ${validationResult.errors.join(", ")}`,
-      payload: validationResult,
-    }));
-
-    const offer = validationResult.valid
-      ? await clients.offer.create({
-          decision: negotiation.negotiationDecision,
+    // Multi-offer fan-out: validate per-merchant and persist N independent
+    // Offer rows. Single/bundle stays on the original code path so existing
+    // wallets and tests continue to read `result.offer`.
+    const decision = negotiation.negotiationDecision;
+    let validationResult;
+    let offer = null;
+    let offers: import("@city-wallet/contracts").Offer[] = [];
+    if (decision.decision === "multi_offer") {
+      const { validateMultiOfferDecision } = await import("@city-wallet/validation-domain");
+      const multi = validateMultiOfferDecision({
+        decision,
+        merchants,
+        context: negotiationContext,
+      });
+      validationResult = multi.overall;
+      await repository.saveValidationResult(makeId("validation"), decisionId, validationResult);
+      analyticsEvents.push(await clients.analytics.record({
+        type: "offer_validated",
+        layer: "validation",
+        message: validationResult.valid
+          ? `Multi-offer validators accepted ${multi.validSelections.length}/${decision.selectedMerchants.length} entries.`
+          : `Multi-offer validators rejected all entries: ${validationResult.errors.join(", ")}`,
+        payload: validationResult,
+      }));
+      // Each valid selection becomes its own single_offer Offer row, sharing
+      // the run's headline/subheadline only as a label fallback when the LLM
+      // didn't supply per-intent copy.
+      for (const selection of multi.validSelections) {
+        const merchant = merchants.find((candidate) => candidate.id === selection.merchantId);
+        const intentLabel = selection.intentLabel ?? "offer";
+        const perOfferDecision: import("@city-wallet/contracts").NegotiationDecision = {
+          ...decision,
+          decision: "single_offer",
+          selectedMerchants: [selection],
+          consumerHeadline: humanizeIntent(intentLabel, merchant?.name),
+          consumerSubheadline: merchant?.name
+            ? `${merchant.name} - ${selection.product}`
+            : selection.product,
+        };
+        const created = await clients.offer.create({
+          decision: perOfferDecision,
           merchants,
           context: negotiationContext,
-        })
-      : null;
-
-    if (offer) {
+        });
+        if (created) offers.push(created);
+      }
       analyticsEvents.push(await clients.analytics.record({
-        type: "offer_shown",
+        type: "multi_offer_emitted",
         layer: "offer",
-        offerId: offer.offerId,
-        message: `Offer shown: ${offer.headline}`,
-        payload: offer,
+        message: `Multi-offer run produced ${offers.length} offer(s).`,
+        payload: {
+          totalSelections: decision.selectedMerchants.length,
+          validSelections: multi.validSelections.length,
+          intents: offers.map((entry) => ({ offerId: entry.offerId, headline: entry.headline })),
+        },
       }));
+      for (const entry of offers) {
+        analyticsEvents.push(await clients.analytics.record({
+          type: "offer_shown",
+          layer: "offer",
+          offerId: entry.offerId,
+          message: `Offer shown: ${entry.headline}`,
+          payload: entry,
+        }));
+      }
+    } else {
+      validationResult = await clients.validation.validate({
+        decision,
+        merchants,
+        context: negotiationContext,
+      });
+      await repository.saveValidationResult(makeId("validation"), decisionId, validationResult);
+      analyticsEvents.push(await clients.analytics.record({
+        type: "offer_validated",
+        layer: "validation",
+        message: validationResult.valid ? "Offer decision passed validators." : `Validation failed: ${validationResult.errors.join(", ")}`,
+        payload: validationResult,
+      }));
+      offer = validationResult.valid
+        ? await clients.offer.create({
+            decision,
+            merchants,
+            context: negotiationContext,
+          })
+        : null;
+      if (offer) {
+        offers = [offer];
+        analyticsEvents.push(await clients.analytics.record({
+          type: "offer_shown",
+          layer: "offer",
+          offerId: offer.offerId,
+          message: `Offer shown: ${offer.headline}`,
+          payload: offer,
+        }));
+      }
     }
 
     let postNegotiationNoOfferReason: NoOfferReason | undefined;
     if (!validationResult.valid) {
       postNegotiationNoOfferReason = "validation_failed";
-    } else if (negotiation.negotiationDecision.decision === "no_offer") {
+    } else if (decision.decision === "no_offer") {
       postNegotiationNoOfferReason = "negotiator_returned_no_offer";
+    } else if (decision.decision === "multi_offer" && offers.length === 0) {
+      postNegotiationNoOfferReason = "validation_failed";
     }
 
     return completeRun({
@@ -848,9 +982,10 @@ export async function orchestrate(body: unknown): Promise<OrchestrationResult> {
         candidateMerchants: negotiation.candidateMerchants,
         bundleCandidates: negotiation.bundleCandidates,
         negotiationBrief: negotiation.negotiationBrief,
-        negotiationDecision: negotiation.negotiationDecision,
+        negotiationDecision: decision,
         validationResult,
         offer,
+        offers,
         analyticsEvents,
         providerBudget,
         discoveredMerchants,
@@ -1038,7 +1173,7 @@ async function runUserContextPipeline(input: {
 
   const agentTrace: AgentTrace = { assembler: null, userNegotiator: null };
   let assembled: AssembledUserContext | null = null;
-  const assemblerTimeoutMs = Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 15000);
+  const assemblerTimeoutMs = Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 45000);
   try {
     const assembleResult = await assembleUserContext({
       userId: input.userId,
@@ -1111,7 +1246,7 @@ async function runUserContextPipeline(input: {
     };
   }
 
-  const negotiatorTimeoutMs = Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 15000);
+  const negotiatorTimeoutMs = Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 45000);
   let userNegotiationPosition: UserNegotiationPosition | null = null;
   try {
     const negotiatorResult = await runUserNegotiator({
@@ -1406,9 +1541,7 @@ async function loadStoredMerchantsForWallet(
   context: ConsumerContextSnapshot,
 ): Promise<{ merchants: Merchant[]; metadata: NearbyMerchantSearchMetadata }> {
   const matchedZones = context.matchedZones ?? [];
-  const zoneIds = matchedZones.length > 0
-    ? matchedZones.map((zone) => zone.id)
-    : context.locationMode === "demo_geofence_fallback" ? [context.zoneId] : [];
+  const zoneIds = matchedZones.map((zone) => zone.id);
   const zoneMerchants = (await Promise.all(zoneIds.map((zoneId) => repository.listMerchantsByZone(zoneId)))).flat();
   const sourcePool = zoneMerchants.length > 0 || context.locationMode === "real_browser_location"
     ? zoneMerchants
@@ -1514,6 +1647,15 @@ function readJson(event: APIGatewayProxyEventV2): unknown {
   if (!event.body) return {};
   const body = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString("utf8") : event.body;
   return JSON.parse(body);
+}
+
+function humanizeIntent(intentLabel: string, merchantName?: string) {
+  const label = intentLabel.replace(/_/g, " ");
+  if (intentLabel === "lunch_break") return merchantName ? `Lunch at ${merchantName}` : "Quick lunch nearby";
+  if (intentLabel === "gift_for_visitor") return merchantName ? `Gift from ${merchantName}` : "Small gift on the way";
+  if (intentLabel === "warm_break") return merchantName ? `Warm break at ${merchantName}` : "Warm break nearby";
+  if (merchantName) return `${label} at ${merchantName}`;
+  return label.replace(/^./, (char) => char.toUpperCase());
 }
 
 function maskSecret(value: string) {
@@ -1757,7 +1899,7 @@ async function runSimulatorPreview(request: { userId: string; profileId?: string
           consumerSnapshot: consumerContext,
           userProfile,
           client,
-          timeoutMs: Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 15000),
+          timeoutMs: Number(process.env.USER_CONTEXT_AGENT_TIMEOUT_MS ?? 45000),
         });
         assembledUserContext = assembleResult.context;
         agentTrace.assembler = {
@@ -1774,7 +1916,7 @@ async function runSimulatorPreview(request: { userId: string; profileId?: string
           userProfile,
           nearbyMerchantCount: 0,
           client,
-          timeoutMs: Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 15000),
+          timeoutMs: Number(process.env.USER_NEGOTIATOR_AGENT_TIMEOUT_MS ?? 45000),
         });
         userNegotiationPosition = negotiatorResult.position;
         agentTrace.userNegotiator = {

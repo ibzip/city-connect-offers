@@ -121,6 +121,17 @@ export interface CityWalletRepository {
   deleteMockContextProfile(profileId: string): Promise<void>;
   saveUserContextAgentRun(run: UserContextAgentRun): Promise<UserContextAgentRun>;
   listUserContextAgentRuns(input: { userId: string; limit?: number }): Promise<UserContextAgentRun[]>;
+  /**
+   * Wipe per-session, per-user transient state so the wallet starts a fresh
+   * session on every load. Removes offers, redemption tokens, redemptions,
+   * cashback ledger entries, orchestration runs, validation/decision/brief
+   * rows, user events, and analytics events for that user.
+   *
+   * Preserves: merchants, zones, merchant rules/insights, mock context
+   * profiles (so the seeded "active" mock profile keeps steering the LLM),
+   * user profile, and merchants imported by the merchant portal.
+   */
+  clearUserTransientState(userId: string): Promise<{ clearedCounts: Record<string, number> }>;
 }
 
 export type MerchantListFilter = {
@@ -555,6 +566,66 @@ export class SeededRepository implements CityWalletRepository {
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
     const limit = input.limit && input.limit > 0 ? input.limit : runs.length;
     return clone(runs.slice(0, limit));
+  }
+
+  async clearUserTransientState(userId: string) {
+    const offerIdsForUser = new Set(this.tables.offers.filter((offer) => offer.consumerId === userId).map((offer) => offer.offerId));
+    const counts: Record<string, number> = {
+      offers: 0,
+      tokens: 0,
+      redemptions: 0,
+      cashbackLedger: 0,
+      orchestrationRuns: 0,
+      validationResults: 0,
+      negotiationDecisions: 0,
+      negotiationBriefs: 0,
+      userEvents: 0,
+      analyticsEvents: 0,
+      userContextAgentRuns: 0,
+      contexts: 0,
+    };
+    const before = {
+      offers: this.tables.offers.length,
+      tokens: this.tables.tokens.length,
+      redemptions: this.tables.redemptions.length,
+      cashbackLedger: this.tables.cashbackLedger.length,
+      orchestrationRuns: this.tables.orchestrationRuns.length,
+      validationResults: this.tables.validationResults.length,
+      negotiationDecisions: this.tables.negotiationDecisions.length,
+      negotiationBriefs: this.tables.negotiationBriefs.length,
+      userEvents: this.tables.userEvents.length,
+      analyticsEvents: this.tables.analyticsEvents.length,
+      userContextAgentRuns: this.tables.userContextAgentRuns.length,
+      contexts: this.tables.contexts.length,
+    };
+    this.tables.offers = this.tables.offers.filter((offer) => offer.consumerId !== userId);
+    this.tables.tokens = this.tables.tokens.filter((token) => !offerIdsForUser.has(token.offerId));
+    this.tables.redemptions = this.tables.redemptions.filter((entry) => !offerIdsForUser.has(entry.offerId));
+    this.tables.cashbackLedger = this.tables.cashbackLedger.filter((entry) => entry.userId !== userId);
+    this.tables.orchestrationRuns = this.tables.orchestrationRuns.filter((run) => run.userId !== userId);
+    this.tables.userEvents = this.tables.userEvents.filter((event) => event.userId !== userId);
+    this.tables.userContextAgentRuns = this.tables.userContextAgentRuns.filter((run) => run.userId !== userId);
+    this.tables.contexts = this.tables.contexts.filter((ctx) => ctx.userId !== userId);
+    // Best-effort cleanup of decision/brief/validation rows that referenced
+    // briefs created for this user. Briefs aren't tagged with userId in the
+    // in-memory shape, so we conservatively keep them.
+    this.tables.analyticsEvents = this.tables.analyticsEvents.filter((event) => {
+      if (event.offerId && offerIdsForUser.has(event.offerId)) return false;
+      return true;
+    });
+    counts.offers = before.offers - this.tables.offers.length;
+    counts.tokens = before.tokens - this.tables.tokens.length;
+    counts.redemptions = before.redemptions - this.tables.redemptions.length;
+    counts.cashbackLedger = before.cashbackLedger - this.tables.cashbackLedger.length;
+    counts.orchestrationRuns = before.orchestrationRuns - this.tables.orchestrationRuns.length;
+    counts.validationResults = before.validationResults - this.tables.validationResults.length;
+    counts.negotiationDecisions = before.negotiationDecisions - this.tables.negotiationDecisions.length;
+    counts.negotiationBriefs = before.negotiationBriefs - this.tables.negotiationBriefs.length;
+    counts.userEvents = before.userEvents - this.tables.userEvents.length;
+    counts.analyticsEvents = before.analyticsEvents - this.tables.analyticsEvents.length;
+    counts.userContextAgentRuns = before.userContextAgentRuns - this.tables.userContextAgentRuns.length;
+    counts.contexts = before.contexts - this.tables.contexts.length;
+    return { clearedCounts: counts };
   }
 }
 
@@ -1280,6 +1351,42 @@ export class PrismaRepository implements CityWalletRepository {
       take: input.limit && input.limit > 0 ? input.limit : 100,
     });
     return rows.map((row: any) => userContextAgentRunFromRow(row));
+  }
+
+  async clearUserTransientState(userId: string) {
+    const db = this.prisma as any;
+    const offers = await db.offer.findMany({ where: { consumerId: userId }, select: { id: true } });
+    const offerIds = offers.map((row: { id: string }) => row.id);
+    const counts: Record<string, number> = {};
+    if (offerIds.length > 0) {
+      const tokens = await db.redemptionToken.deleteMany({ where: { offerId: { in: offerIds } } });
+      counts.tokens = tokens.count ?? 0;
+      const redemptions = await db.redemption.deleteMany({ where: { offerId: { in: offerIds } } });
+      counts.redemptions = redemptions.count ?? 0;
+      const offerItems = await db.offerItem.deleteMany({ where: { offerId: { in: offerIds } } });
+      counts.offerItems = offerItems.count ?? 0;
+      const analytics = await db.analyticsEvent.deleteMany({ where: { offerId: { in: offerIds } } });
+      counts.analyticsEvents = analytics.count ?? 0;
+      const offersDeleted = await db.offer.deleteMany({ where: { id: { in: offerIds } } });
+      counts.offers = offersDeleted.count ?? 0;
+    } else {
+      counts.tokens = 0;
+      counts.redemptions = 0;
+      counts.offerItems = 0;
+      counts.analyticsEvents = 0;
+      counts.offers = 0;
+    }
+    const cashback = await db.cashbackLedgerEntry.deleteMany({ where: { userId } });
+    counts.cashbackLedger = cashback.count ?? 0;
+    const orchestrationRuns = await db.orchestrationRun.deleteMany({ where: { userId } });
+    counts.orchestrationRuns = orchestrationRuns.count ?? 0;
+    const userEvents = await db.userEvent.deleteMany({ where: { userId } });
+    counts.userEvents = userEvents.count ?? 0;
+    const agentRuns = await db.userContextAgentRun.deleteMany({ where: { userId } });
+    counts.userContextAgentRuns = agentRuns.count ?? 0;
+    const ctx = await db.userContextSnapshot.deleteMany({ where: { userId } });
+    counts.contexts = ctx.count ?? 0;
+    return { clearedCounts: counts };
   }
 }
 

@@ -30,6 +30,8 @@
       "@city-wallet/offer-domain": ["packages/offer-domain/src/index.ts"],
       "@city-wallet/redemption-domain": ["packages/redemption-domain/src/index.ts"],
       "@city-wallet/analytics-domain": ["packages/analytics-domain/src/index.ts"],
+      "@city-wallet/raw-context-domain": ["packages/raw-context-domain/src/index.ts"],
+      "@city-wallet/user-agent-domain": ["packages/user-agent-domain/src/index.ts"],
       "@city-wallet/utils": ["packages/utils/src/index.ts"]
     }
   }

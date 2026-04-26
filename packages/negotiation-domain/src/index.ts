@@ -364,7 +364,7 @@ export class AzureOpenAILLMClient implements LLMClient {
         method: "POST",
         headers: { "content-type": "application/json", "api-key": apiKey },
         body: JSON.stringify(requestBody),
-      }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 15_000), "Azure OpenAI request");
+      }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 45_000), "Azure OpenAI request");
       if (!response.ok) {
         const text = await response.text();
         throw new BackendNegotiatorError("request_failed", `Azure OpenAI ${response.status}: ${text}`);
@@ -450,7 +450,8 @@ The JSON object MUST have this exact shape (field names, types, and enums are ma
       "merchantId": "cafe_mueller",
       "product": "Cappuccino",
       "incentive": { "type": "cashback", "percent": 10, "valueText": "10% cashback" },
-      "roleInJourney": "warm_break"
+      "roleInJourney": "warm_break",
+      "intentLabel": "lunch_break"
     }
   ],
   "validityMinutes": 30,
@@ -477,7 +478,7 @@ The JSON object MUST have this exact shape (field names, types, and enums are ma
 }
 
 Rules:
-- "decision" MUST be exactly one of: "no_offer" | "single_offer" | "bundle_offer". Do NOT use "propose_offer" or any other value.
+- "decision" MUST be exactly one of: "no_offer" | "single_offer" | "bundle_offer" | "multi_offer". Do NOT use "propose_offer" or any other value.
 - Use "selectedMerchants" (array). Do NOT use "selectedOffer".
 - "selectedMerchants[].incentive.type" MUST be one of: "cashback" | "discount" | "priority_pickup" | "bundle_unlock".
 - "selectedMerchants[].incentive.percent" is OPTIONAL (number 0-100); "valueText" is REQUIRED (string).
@@ -487,6 +488,63 @@ Rules:
 - "rejectedCandidates" is an array of { "id": string, "reason": string }.
 - For a "no_offer" decision, set "selectedMerchants" to [] and explain in "reasoning".
 - Respect the brief's hard constraints (max walking distance, max bundle stops, allowed offer types) and the user's negotiation position. Stay within merchant rule caps (maxDiscountPercent, dailyBudgetRemainingEuro, offerTypesAllowed).
+
+Decision selection:
+- "single_offer": one merchant fully serves one user intent.
+- "bundle_offer": 2-3 merchants form ONE coherent journey (e.g. coffee + bookshop) for ONE intent.
+- "multi_offer": the assembled context describes TWO OR MORE simultaneous, INDEPENDENT user intents (e.g. "I am taking a lunch break right now" AND "a friend is visiting in an hour and I should bring a small gift"). In that case emit one entry per intent in "selectedMerchants", each with its own intentLabel ("lunch_break", "gift_for_visitor", etc.). Do NOT use multi_offer to dump unrelated coupons - only when the user context genuinely contains parallel needs.
+
+Multi-offer JSON shape (one entry per independent intent):
+{
+  "decision": "multi_offer",
+  "selectedMerchants": [
+    {
+      "merchantId": "cafe_mueller",
+      "product": "Lunch bowl",
+      "incentive": { "type": "cashback", "percent": 8, "valueText": "8% cashback" },
+      "roleInJourney": "lunch_stop",
+      "intentLabel": "lunch_break"
+    },
+    {
+      "merchantId": "blumen_bauer",
+      "product": "Small bouquet",
+      "incentive": { "type": "discount", "percent": 10, "valueText": "10% off" },
+      "roleInJourney": "gift_pickup",
+      "intentLabel": "gift_for_visitor"
+    }
+  ],
+  "validityMinutes": 60,
+  "consumerIncentivesOffered": ["Lunch bowl - 8% cashback", "Small bouquet - 10% off"],
+  "merchantIncentivesOffered": ["lunch-window visit", "gift-window visit"],
+  "utilityAssessment": {
+    "consumer": { "score": 84, "whyPositive": ["covers both lunch and visitor gift in one short loop"], "risks": [] },
+    "merchants": [
+      { "merchantId": "cafe_mueller", "score": 72, "whyPositive": ["fills quiet midday"], "risks": [] },
+      { "merchantId": "blumen_bauer", "score": 68, "whyPositive": ["upsells small bouquet"], "risks": [] }
+    ],
+    "platform": { "score": 80, "whyPositive": ["solves two needs in one local journey"], "risks": [] }
+  },
+  "longTermGoalFit": {
+    "consumer": ["fewer noisy notifications, higher per-visit relevance"],
+    "merchants": ["repeat visits during quiet windows"],
+    "platform": ["mutual utility across simultaneous intents"]
+  },
+  "reasoning": [
+    "User is on lunch break with limited time.",
+    "Calendar/social signals show a visitor arriving in ~60 minutes; a small gift stop fits the same loop."
+  ],
+  "rejectedCandidates": [],
+  "consumerHeadline": "Two quick stops near you",
+  "consumerSubheadline": "Lunch + a small gift on the way",
+  "cta": "Claim offer",
+  "confidence": 0.85
+}
+
+When emitting "multi_offer":
+- Each entry MUST address a DIFFERENT intent. Set "intentLabel" on every entry.
+- Keep entries within the user's hard walking constraint individually (each merchant <= maxWalkingMeters from the user). Do not sum distances.
+- Cap entries at 3.
+- "consumerHeadline"/"consumerSubheadline" describe the bundle of independent offers in one short line.
 
 Three-sided utility:
 - Each merchant in the "merchants" array carries a "goals" field (array of MerchantGoal { merchantId, goal }). These are the merchant's own commercial objectives (e.g. "sustainable_quiet_hour_lift", "introduce_new_product_line", "loyalty_during_quiet_hours"). Treat them as a soft signal: when picking between candidates with similar consumer fit, prefer the one whose goals best match the current context (e.g. quiet-hour goals fit a "very_quiet" or "quiet" businessState; new-product goals fit when the user's intent is "browsing" or "discovery").

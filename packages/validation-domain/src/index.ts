@@ -4,6 +4,7 @@ import {
   type ConsumerContextSnapshot,
   type Merchant,
   type NegotiationDecision,
+  type SelectedMerchant,
   type ValidationCheck,
   type ValidationResult,
 } from "@city-wallet/contracts";
@@ -219,5 +220,88 @@ export function validateNegotiationDecision(input: {
       ? ["Validators accepted smallest-sufficient incentives under configured caps."]
       : [],
     checks,
+  };
+}
+
+export type MultiOfferValidationEntry = {
+  merchant: SelectedMerchant;
+  result: ValidationResult;
+  valid: boolean;
+};
+
+/**
+ * Validates a multi_offer decision per merchant: each selectedMerchant is
+ * treated as its own independent single_offer for validation purposes. We
+ * keep the valid ones, drop the invalid ones, and return everything so the
+ * orchestrator can persist N independent Offer rows + emit clear analytics.
+ *
+ * For single_offer / bundle_offer decisions this just returns the regular
+ * validation result wrapped in a one-element array so callers can use the
+ * same code path.
+ */
+export function validateMultiOfferDecision(input: {
+  decision: NegotiationDecision;
+  merchants: Merchant[];
+  context: ConsumerContextSnapshot;
+}): {
+  overall: ValidationResult;
+  entries: MultiOfferValidationEntry[];
+  validSelections: SelectedMerchant[];
+} {
+  const schemaCheck = schemaValidator(input.decision);
+  if (!schemaCheck.passed) {
+    const overall: ValidationResult = {
+      valid: false,
+      errors: [`${schemaCheck.validator}: ${schemaCheck.detail}`],
+      warnings: ["Schema validation failed; per-offer validators skipped."],
+      checks: [schemaCheck],
+    };
+    return { overall, entries: [], validSelections: [] };
+  }
+
+  if (input.decision.decision !== "multi_offer") {
+    const overall = validateNegotiationDecision(input);
+    const entries: MultiOfferValidationEntry[] = input.decision.selectedMerchants.map((merchant) => ({
+      merchant,
+      result: overall,
+      valid: overall.valid,
+    }));
+    return {
+      overall,
+      entries,
+      validSelections: overall.valid ? input.decision.selectedMerchants : [],
+    };
+  }
+
+  const entries: MultiOfferValidationEntry[] = input.decision.selectedMerchants.map((merchant) => {
+    const perOfferDecision: NegotiationDecision = {
+      ...input.decision,
+      decision: "single_offer",
+      selectedMerchants: [merchant],
+    };
+    const result = validateNegotiationDecision({
+      decision: perOfferDecision,
+      merchants: input.merchants,
+      context: input.context,
+    });
+    return { merchant, result, valid: result.valid };
+  });
+
+  const valid = entries.filter((entry) => entry.valid);
+  const errors = entries
+    .filter((entry) => !entry.valid)
+    .map((entry) => `merchant ${entry.merchant.merchantId}: ${entry.result.errors.join("; ")}`);
+  const overall: ValidationResult = {
+    valid: valid.length > 0,
+    errors,
+    warnings: valid.length === entries.length
+      ? ["All multi_offer entries validated."]
+      : [`Validated ${valid.length}/${entries.length} multi_offer entries; rest dropped.`],
+    checks: [schemaCheck],
+  };
+  return {
+    overall,
+    entries,
+    validSelections: valid.map((entry) => entry.merchant),
   };
 }

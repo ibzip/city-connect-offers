@@ -64,4 +64,11 @@ export const triggerConfig: TriggerConfig[] = [
     condition: { source: "consumer_wallet" },
     action: "request_negotiation",
   },
+  {
+    id: "trg_lunch_break_notification_clicked",
+    enabled: true,
+    eventType: "LunchBreakNotificationClicked",
+    condition: { source: "consumer_wallet" },
+    action: "request_negotiation",
+  },
 ];

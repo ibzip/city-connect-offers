@@ -3,6 +3,7 @@ import { defaultProviderBudget } from "@city-wallet/contracts";
 import type { CityWalletRepository } from "@city-wallet/db";
 import { createDefaultProviders } from "@city-wallet/providers";
 import type {
+  GeocodingProvider,
   LocalEventPayload,
   LocationPayload,
   PaymentDensityProvider,
@@ -12,6 +13,7 @@ import type {
   LocationProvider,
   UserContextProvider,
   LocalEventsProvider,
+  ReverseGeocodeResult,
 } from "@city-wallet/providers";
 import { makeId, nowIso } from "@city-wallet/utils";
 
@@ -21,6 +23,7 @@ export interface ContextProviders {
   paymentDensity?: PaymentDensityProvider;
   userContext: UserContextProvider;
   localEvents: LocalEventsProvider;
+  geocoding?: GeocodingProvider;
 }
 
 export interface BuildContextInput {
@@ -47,20 +50,40 @@ export async function collectConfiguredSignals(
   const location = await providers.location.getLocation(input.userId, input.location);
   const lat = location.payload.latitude;
   const lng = location.payload.longitude;
-  const matchedZones = lat !== undefined && lng !== undefined
+  const matchedZones = lat !== undefined && lng !== undefined && location.payload.mode !== "no_location"
     ? await repository.findZonesContainingPoint(lat, lng)
     : [];
   const fallbackZone = location.payload.mode === "demo_geofence_fallback"
     ? await repository.getZoneById(location.payload.zoneId)
     : null;
   const zone = matchedZones[0] ?? fallbackZone;
-  const zoneId = zone?.id ?? (location.payload.mode === "real_browser_location" ? "outside_activated_city_wallet_area" : location.payload.zoneId);
+  const zoneId = location.payload.mode === "no_location"
+    ? "no_location"
+    : zone?.id ?? (location.payload.mode === "real_browser_location" ? "outside_activated_city_wallet_area" : location.payload.zoneId);
 
-  const [weather, userContext, localEvents] = await Promise.all([
-    providers.weather.getWeather({ latitude: lat, longitude: lng, zoneId, budget: input.providerBudget }),
-    providers.userContext.getUserContext(input.userId),
-    providers.localEvents.getLocalEvents(zoneId),
-  ]);
+  // When the user has not granted location yet, skip weather + local-events
+  // network calls (they have nothing meaningful to compute on) and surface a
+  // declared user context only.
+  const noLocation = location.payload.mode === "no_location";
+  const [weather, userContext, localEvents] = noLocation
+    ? [null, await providers.userContext.getUserContext(input.userId), null] as const
+    : await Promise.all([
+        providers.weather.getWeather({ latitude: lat, longitude: lng, zoneId, budget: input.providerBudget }),
+        providers.userContext.getUserContext(input.userId),
+        providers.localEvents.getLocalEvents(zoneId),
+      ]);
+
+  let reverseGeocode: ReverseGeocodeResult | null = null;
+  if (!noLocation && lat !== undefined && lng !== undefined && providers.geocoding?.reverseGeocode && input.providerBudget) {
+    try {
+      reverseGeocode = await providers.geocoding.reverseGeocode(
+        { latitude: lat, longitude: lng },
+        { budget: input.providerBudget, cache: undefined },
+      );
+    } catch {
+      reverseGeocode = null;
+    }
+  }
 
   return {
     weather,
@@ -68,6 +91,7 @@ export async function collectConfiguredSignals(
     userContext,
     localEvents,
     matchedZones,
+    reverseGeocode,
   };
 }
 
@@ -89,6 +113,7 @@ export async function buildConsumerContextSnapshot(
 
   const contextPayload = signals.userContext.payload;
   const firstZone = signals.matchedZones[0];
+  const noLocation = signals.location.payload.mode === "no_location";
   const outsideActivatedArea = signals.location.payload.mode === "real_browser_location" && !firstZone;
   const location = signals.location.payload.latitude !== undefined && signals.location.payload.longitude !== undefined
     ? {
@@ -99,19 +124,30 @@ export async function buildConsumerContextSnapshot(
       }
     : undefined;
 
+  const reverseGeocode = signals.reverseGeocode;
+  const userCityName = reverseGeocode?.city
+    ? (reverseGeocode.countryCode ? `${reverseGeocode.city}, ${reverseGeocode.countryCode}` : reverseGeocode.city)
+    : null;
+
   const snapshot: ConsumerContextSnapshot = {
     snapshotId: makeId("ctx"),
     userId: input.userId,
-    zoneId: firstZone?.id ?? (outsideActivatedArea ? "outside_activated_city_wallet_area" : signals.location.payload.zoneId),
-    zoneName: firstZone?.name ?? (outsideActivatedArea ? "Outside activated City Wallet area" : previousContext?.zoneName),
+    zoneId: noLocation
+      ? "no_location"
+      : firstZone?.id ?? (outsideActivatedArea ? "outside_activated_city_wallet_area" : signals.location.payload.zoneId),
+    zoneName: noLocation
+      ? "Location not granted yet"
+      : firstZone?.name ?? (outsideActivatedArea ? "Outside activated City Wallet area" : previousContext?.zoneName),
+    userCityName,
+    userCountryCode: reverseGeocode?.countryCode ?? null,
     matchedZones: signals.matchedZones,
     userLocation: location,
     locationMode: signals.location.payload.mode,
     geofenceMatched: signals.matchedZones.length > 0,
-    weatherMood: signals.weather.payload.mood,
-    weatherDescription: signals.weather.payload.description,
-    weatherSource: signals.weather.payload.provider,
-    weatherTemperatureC: signals.weather.payload.temperatureC,
+    weatherMood: signals.weather?.payload.mood ?? "unknown",
+    weatherDescription: signals.weather?.payload.description ?? "Awaiting location",
+    weatherSource: signals.weather?.payload.provider ?? "mock_weather_fallback",
+    weatherTemperatureC: signals.weather?.payload.temperatureC,
     timeContext: deriveTimeContext(new Date()),
     declaredIntent: input.declaredContext?.intent ?? contextPayload.declaredIntent,
     availableMinutes: input.declaredContext?.availableMinutes ?? contextPayload.availableMinutes,
@@ -146,17 +182,17 @@ export function normalizeContextForPrivacy(snapshot: ConsumerContextSnapshot): C
 }
 
 function normalizeSignalsForStorage(signals: {
-  weather: NormalizedSignal<WeatherPayload>;
+  weather: NormalizedSignal<WeatherPayload> | null;
   location: NormalizedSignal<LocationPayload>;
   userContext: NormalizedSignal<UserContextPayload>;
-  localEvents: NormalizedSignal<LocalEventPayload[]>;
+  localEvents: NormalizedSignal<LocalEventPayload[]> | null;
   matchedZones: unknown[];
 }) {
   return [
     signals.location,
-    signals.weather,
+    ...(signals.weather ? [signals.weather] : []),
     signals.userContext,
-    signals.localEvents,
+    ...(signals.localEvents ? [signals.localEvents] : []),
     {
       signalId: makeId("sig_geofence"),
       source: "commerce_zone_repository",

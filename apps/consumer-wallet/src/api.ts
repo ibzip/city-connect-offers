@@ -4,6 +4,7 @@ import type {
   DevSimulatorPreviewResult,
   MockContextProfile,
   MockContextProfileUpsert,
+  Offer,
   OrchestrateRequest,
   OrchestrationResult,
   RedemptionResult,
@@ -81,6 +82,14 @@ export function orchestrate(request: OrchestrateRequest) {
 
 export function claimOffer(offerId: string) {
   return apiPost<{ tokens: RedemptionToken[] }>("/api/offers/" + offerId + "/claim", { offerId });
+}
+
+export function rejectOffer(offerId: string) {
+  return apiPost<{ ok: true; offer: Offer }>(`/api/offers/${encodeURIComponent(offerId)}/reject`, { offerId });
+}
+
+export function resetUserState(userId: string) {
+  return apiPost<{ ok: true; clearedCounts: Record<string, number> }>(`/api/consumer/reset`, { userId });
 }
 
 export function redeem(code: string, merchantId: string) {

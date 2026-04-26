@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, MapPin, RefreshCw, Sliders, Sparkles, X } from "lucide-react";
+import { Bell, Loader2, MapPin, RefreshCw, Sliders, Sparkles, X } from "lucide-react";
 import type {
-  AnalyticsEvent,
   ConnectedSourceChip,
   ConsumerContextSnapshot,
   Offer,
@@ -17,10 +16,10 @@ import {
   Button,
   ExplainabilityPanel,
   JsonPanel,
-  OfferCard,
   PhoneFrame,
   ProviderBadge,
   Section,
+  TokenCard,
   TrustNote,
   ValidityPill,
 } from "@city-wallet/ui";
@@ -28,9 +27,10 @@ import {
   apiGet,
   claimOffer,
   fetchConnectedSources,
-  fetchContextProfileVersion,
   fetchContextSummary,
   orchestrate,
+  rejectOffer,
+  resetUserState,
   updateUserProfile,
 } from "./api";
 
@@ -55,14 +55,11 @@ type ConsumerState = {
   context: ConsumerContextSnapshot | null;
   offers: Offer[];
   tokens: RedemptionToken[];
-  events: AnalyticsEvent[];
   lastRun: OrchestrationResult | null;
   activeMockProfile: ActiveMockProfileSummary | null;
 };
 
-const FOREGROUND_THROTTLE_MS = 30_000;
-const REFRESH_DEBOUNCE_MS = 1_500;
-const LOCATION_CHANGE_THRESHOLD_METERS = 50;
+type WalletTab = "offers" | "redeem";
 
 export function WalletApp() {
   const [state, setState] = useState<ConsumerState | null>(null);
@@ -72,14 +69,14 @@ export function WalletApp() {
   const [connectedSources, setConnectedSources] = useState<ConnectedSourceChip[]>([]);
   const [contextSummary, setContextSummary] = useState<Awaited<ReturnType<typeof fetchContextSummary>> | null>(null);
   const [debugMode, setDebugMode] = useState(false);
-  const [locationGranted, setLocationGranted] = useState(false);
   const [locationCoords, setLocationCoords] = useState<{ latitude: number; longitude: number; accuracyMeters?: number } | null>(null);
-  const [whyOpen, setWhyOpen] = useState(false);
-  const [profileVersion, setProfileVersion] = useState<number>(0);
+  const [showLunchBanner, setShowLunchBanner] = useState(true);
+  const [hasTriggered, setHasTriggered] = useState(false);
+  const [tab, setTab] = useState<WalletTab>("offers");
+  const [rejectedOfferIds, setRejectedOfferIds] = useState<Set<string>>(new Set());
   const [prefsOpen, setPrefsOpen] = useState(false);
-  const lastForegroundAt = useRef(0);
-  const lastRefreshAt = useRef(0);
-  const autoStarted = useRef(false);
+  const [whyOpen, setWhyOpen] = useState(false);
+  const bootstrapped = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -88,164 +85,164 @@ export function WalletApp() {
 
   const userId = "user_mia";
 
-  const load = useCallback(async () => {
+  const loadState = useCallback(async () => {
     const [next, sources, summary] = await Promise.all([
       apiGet<ConsumerState>(`/api/consumer/state?userId=${userId}`),
       fetchConnectedSources(userId).catch(() => [] as ConnectedSourceChip[]),
       fetchContextSummary(userId).catch(() => null),
     ]);
     setState(next);
-    setLastRun(next.lastRun);
     setConnectedSources(sources);
     setContextSummary(summary);
+    return next;
   }, []);
 
-  const runContextPipeline = useCallback(async (
-    eventType:
-      | "WalletOpened"
-      | "UserDeclaredContextChanged"
-      | "UserEnteredZone"
-      | "AppReturnedToForeground"
-      | "ManualRefreshRequested",
-    options?: { coords?: { latitude: number; longitude: number; accuracyMeters?: number } | null },
-  ) => {
-    setBusy(true);
-    setApiError(null);
-    try {
-      const coords = options?.coords ?? locationCoords;
-      const result = await orchestrate({
-        userId,
-        eventType,
-        location: coords ? { ...coords, source: "browser" } : undefined,
-      });
-      setLastRun(result);
-      lastRefreshAt.current = Date.now();
-      await load();
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not reach City Wallet API.");
-      console.error(error);
-    } finally {
-      setBusy(false);
-    }
-  }, [load, locationCoords]);
+  // On every wallet load: wipe transient state (offers, tokens, runs, events)
+  // and start with a fresh session. The "Time for your lunch break"
+  // notification is what kicks off any context/orchestration work.
+  useEffect(() => {
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
+    (async () => {
+      try {
+        await resetUserState(userId);
+      } catch (error) {
+        console.warn("Failed to reset user state:", error);
+      }
+      try {
+        await loadState();
+      } catch (error) {
+        setApiError(error instanceof Error ? error.message : "Could not reach City Wallet.");
+      }
+    })();
+  }, [loadState]);
 
   const requestLocation = useCallback(async () => {
     if (typeof navigator === "undefined" || !navigator.geolocation) return null;
     return new Promise<{ latitude: number; longitude: number; accuracyMeters?: number } | null>((resolve) => {
       navigator.geolocation.getCurrentPosition(
-        (position) => resolve({ latitude: position.coords.latitude, longitude: position.coords.longitude, accuracyMeters: position.coords.accuracy }),
+        (position) => resolve({
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracyMeters: position.coords.accuracy,
+        }),
         () => resolve(null),
-        { enableHighAccuracy: true, timeout: 5_000, maximumAge: 60_000 },
+        { enableHighAccuracy: true, timeout: 8_000, maximumAge: 60_000 },
       );
     });
   }, []);
 
-  async function handleEnableLocation() {
-    const coords = await requestLocation();
-    if (coords) {
+  const triggerLunchPipeline = useCallback(async () => {
+    setBusy(true);
+    setApiError(null);
+    try {
+      const coords = await requestLocation();
+      if (!coords) {
+        setApiError("We need your live location to find lunch options nearby. Please allow location and try again.");
+        return;
+      }
       setLocationCoords(coords);
-      setLocationGranted(true);
-      await runContextPipeline("UserEnteredZone", { coords });
+      setShowLunchBanner(false);
+      setHasTriggered(true);
+      const result = await orchestrate({
+        userId,
+        eventType: "LunchBreakNotificationClicked",
+        location: { ...coords, source: "browser" },
+      });
+      setLastRun(result);
+      await loadState();
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reach City Wallet.");
+    } finally {
+      setBusy(false);
     }
-  }
+  }, [loadState, requestLocation]);
 
   const refresh = useCallback(async () => {
-    if (Date.now() - lastRefreshAt.current < REFRESH_DEBOUNCE_MS) return;
-    lastRefreshAt.current = Date.now();
-    await runContextPipeline("ManualRefreshRequested");
-  }, [runContextPipeline]);
-
-  const bootstrap = useCallback(async () => {
-    await load();
-    await runContextPipeline("WalletOpened");
-    fetchContextProfileVersion(userId).then((v) => setProfileVersion(v.version)).catch(() => {});
-  }, [load, runContextPipeline, userId]);
-
-  useEffect(() => {
-    if (autoStarted.current) return;
-    autoStarted.current = true;
-    bootstrap().catch(console.error);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    function handleVisibility() {
-      if (document.visibilityState !== "visible") return;
-      const now = Date.now();
-      if (now - lastForegroundAt.current < FOREGROUND_THROTTLE_MS) return;
-      lastForegroundAt.current = now;
-      fetchContextProfileVersion(userId)
-        .then((v) => {
-          if (v.version !== profileVersion) {
-            setProfileVersion(v.version);
-            void runContextPipeline("AppReturnedToForeground");
-          } else {
-            void runContextPipeline("AppReturnedToForeground");
-          }
-        })
-        .catch(() => {
-          void runContextPipeline("AppReturnedToForeground");
-        });
+    if (!locationCoords) return triggerLunchPipeline();
+    setBusy(true);
+    setApiError(null);
+    try {
+      const result = await orchestrate({
+        userId,
+        eventType: "ManualRefreshRequested",
+        location: { ...locationCoords, source: "browser" },
+      });
+      setLastRun(result);
+      await loadState();
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reach City Wallet.");
+    } finally {
+      setBusy(false);
     }
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [profileVersion, runContextPipeline]);
+  }, [loadState, locationCoords, triggerLunchPipeline]);
 
-  useEffect(() => {
-    if (!locationGranted || typeof navigator === "undefined" || !navigator.geolocation) return;
-    const watcher = navigator.geolocation.watchPosition(
-      (position) => {
-        const next = { latitude: position.coords.latitude, longitude: position.coords.longitude, accuracyMeters: position.coords.accuracy };
-        setLocationCoords((prev) => {
-          if (!prev) return next;
-          const meters = haversine(prev.latitude, prev.longitude, next.latitude, next.longitude);
-          if (meters > LOCATION_CHANGE_THRESHOLD_METERS) {
-            void runContextPipeline("UserEnteredZone", { coords: next });
-            return next;
-          }
-          return prev;
-        });
-      },
-      undefined,
-      { enableHighAccuracy: true, maximumAge: 60_000, timeout: 10_000 },
-    );
-    return () => navigator.geolocation.clearWatch(watcher);
-  }, [locationGranted, runContextPipeline]);
-
-  async function claim(offerId: string) {
+  async function handleAccept(offerId: string) {
     setBusy(true);
     try {
       await claimOffer(offerId);
-      await load();
+      const next = await loadState();
+      // Auto-jump to Redeem tab so the user sees the new token.
+      if (next.tokens.length > 0) setTab("redeem");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not accept offer.");
     } finally {
       setBusy(false);
     }
   }
 
-  function dismissOffer() {
-    setLastRun(null);
+  async function handleReject(offerId: string) {
+    setBusy(true);
+    setRejectedOfferIds((prev) => {
+      const next = new Set(prev);
+      next.add(offerId);
+      return next;
+    });
+    try {
+      await rejectOffer(offerId);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not reject offer.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   const handleSavePreferences = useCallback(async (update: UserProfileUpdate) => {
     const saved = await updateUserProfile(userId, update);
     setState((prev) => prev ? { ...prev, profile: saved } : prev);
     setPrefsOpen(false);
-    await runContextPipeline("ManualRefreshRequested");
-  }, [runContextPipeline, userId]);
+    if (locationCoords) {
+      await refresh();
+    }
+  }, [locationCoords, refresh, userId]);
 
-  const offer: Offer | null = useMemo(() => lastRun?.offer ?? state?.offers[0] ?? null, [lastRun, state]);
+  // Prefer the live run's offers (multi-offer aware) and fall back to the
+  // server state for offers that have already been persisted (e.g. between
+  // a refresh while offer/token already exist).
+  const offers = useMemo<Offer[]>(() => {
+    const fromRun = lastRun?.offers && lastRun.offers.length > 0
+      ? lastRun.offers
+      : lastRun?.offer
+        ? [lastRun.offer]
+        : [];
+    const stateOffers = state?.offers ?? [];
+    const merged: Offer[] = [];
+    const seen = new Set<string>();
+    for (const offer of [...fromRun, ...stateOffers]) {
+      if (!offer || seen.has(offer.offerId)) continue;
+      seen.add(offer.offerId);
+      merged.push(offer);
+    }
+    return merged.filter((offer) => !rejectedOfferIds.has(offer.offerId) && offer.status !== "dismissed");
+  }, [lastRun, rejectedOfferIds, state]);
+
+  const visibleOffers = useMemo(() => offers.filter((offer) => offer.status === "shown"), [offers]);
+  const tokens = state?.tokens ?? [];
   const profile = state?.profile;
-  const context = lastRun?.consumerContext ?? state?.context;
-  const reasoning = lastRun?.negotiationDecision?.reasoning ?? offer?.why ?? [];
-  const azureRequired = !contextSummary?.assembledUserContext && lastRun;
+  const context = lastRun?.consumerContext ?? state?.context ?? null;
   const noOfferReason = lastRun?.noOfferReason ?? null;
-  const headlineStatus = busy
-    ? "thinking"
-    : offer
-      ? "offer_ready"
-      : noOfferReason
-        ? "no_offer"
-        : "ready";
+
+  const azureRequired = !contextSummary?.assembledUserContext && lastRun;
 
   return (
     <Section>
@@ -257,7 +254,11 @@ export function WalletApp() {
                 {profile?.displayName?.[0] ?? "M"}
               </div>
               <div className="flex items-center gap-2">
-                <ProviderBadge label={context?.zoneName ?? context?.zoneId ?? "loading"} tone="green" />
+                {hasTriggered ? (
+                  <ProviderBadge label={context?.userCityName ?? context?.zoneName ?? "locating"} tone="green" />
+                ) : (
+                  <ProviderBadge label="awaiting location" tone="blue" />
+                )}
                 <button
                   type="button"
                   aria-label="Preferences"
@@ -270,17 +271,14 @@ export function WalletApp() {
             </div>
             <p className="mb-1 text-sm font-medium text-ink-muted">Hello, {profile?.displayName ?? "Mia"}</p>
             <h1 className="font-serif text-3xl font-medium tracking-tight">€1,482.90</h1>
-            <p className="mt-2 font-mono text-xs text-ink-muted">
-              {context?.weatherDescription ?? "checking weather"} · {context?.timeContext ?? "time"}
-            </p>
-            {!locationGranted ? (
-              <div className="mt-4">
-                <Button variant="secondary" onClick={handleEnableLocation}>
-                  <MapPin size={16} /> Enable location
-                </Button>
-              </div>
-            ) : null}
-            {connectedSources.length > 0 ? (
+            {hasTriggered && context ? (
+              <ContextStrip context={context} coords={locationCoords} />
+            ) : (
+              <p className="mt-2 font-mono text-xs text-ink-muted">
+                Tap your lunch reminder to share live context.
+              </p>
+            )}
+            {hasTriggered && connectedSources.length > 0 ? (
               <div className="mt-4 flex flex-wrap gap-1.5">
                 {connectedSources
                   .filter((chip) => chip.status !== "not_connected")
@@ -308,16 +306,20 @@ export function WalletApp() {
           </div>
 
           <div className="surface-paper flex flex-1 flex-col gap-5 overflow-y-auto rounded-t-[2rem] px-5 py-7">
-            <div className="flex items-center justify-between px-2">
-              <h2 className="label-tag font-semibold text-ink-muted">Live Local Offer</h2>
-              {busy ? (
-                <Badge tone="orange">thinking…</Badge>
-              ) : offer ? (
-                <ValidityPill minutes={offer.validityMinutes} />
-              ) : (
-                <Badge>{headlineStatus}</Badge>
-              )}
-            </div>
+            {showLunchBanner && !hasTriggered ? (
+              <LunchBreakBanner busy={busy} onActivate={triggerLunchPipeline} />
+            ) : null}
+
+            {hasTriggered ? (
+              <div className="flex items-center gap-1 rounded-full border border-black/10 bg-paper p-1 text-xs">
+                <TabButton active={tab === "offers"} onClick={() => setTab("offers")}>
+                  Offers {visibleOffers.length > 0 ? `· ${visibleOffers.length}` : ""}
+                </TabButton>
+                <TabButton active={tab === "redeem"} onClick={() => setTab("redeem")}>
+                  Redeem {tokens.length > 0 ? `· ${tokens.length}` : ""}
+                </TabButton>
+              </div>
+            ) : null}
 
             {apiError ? (
               <div className="rounded-2xl border border-red-200 bg-red-50 p-4 text-sm text-red-900">
@@ -331,66 +333,90 @@ export function WalletApp() {
               </div>
             ) : null}
 
-            {!offer && !busy && !apiError ? (
-              <div className="surface-card rounded-2xl p-6 text-center">
-                <Sparkles className="mx-auto mb-3 text-teal" size={20} />
-                <p className="mb-2 font-serif text-lg">{noOfferReason ? "No good local offer right now." : "Check for a relevant local offer."}</p>
-                <p className="mb-4 text-sm text-ink-muted">
-                  {noOfferReason
-                    ? "We'd rather show nothing than a noisy offer."
-                    : "City Wallet quietly checks the local context for a useful nearby moment."}
-                </p>
-                <div className="flex justify-center gap-2">
-                  <Button onClick={refresh}>
-                    <RefreshCw size={16} /> Refresh
-                  </Button>
-                </div>
-              </div>
-            ) : null}
-
-            {busy && !offer ? (
-              <div className="surface-card flex items-center gap-3 rounded-2xl p-6">
-                <Loader2 className="animate-spin text-teal" size={18} />
-                <div className="text-sm text-ink-muted">Checking for a useful local offer…</div>
-              </div>
-            ) : null}
-
-            {offer ? (
+            {hasTriggered && tab === "offers" ? (
               <>
-                <OfferCard offer={offer} disabled={busy} onClaim={() => claim(offer.offerId)} />
-                <div className="flex justify-end">
-                  <Button variant="ghost" onClick={dismissOffer}>Dismiss</Button>
+                <div className="flex items-center justify-between px-2">
+                  <h2 className="label-tag font-semibold text-ink-muted">Live local offers</h2>
+                  {busy ? <Badge tone="orange">thinking…</Badge> : null}
                 </div>
+
+                {busy && visibleOffers.length === 0 ? (
+                  <div className="surface-card flex items-center gap-3 rounded-2xl p-6">
+                    <Loader2 className="animate-spin text-teal" size={18} />
+                    <div className="text-sm text-ink-muted">Reading your live context and picking offers…</div>
+                  </div>
+                ) : null}
+
+                {!busy && visibleOffers.length === 0 ? (
+                  <div className="surface-card rounded-2xl p-6 text-center">
+                    <Sparkles className="mx-auto mb-3 text-teal" size={20} />
+                    <p className="mb-2 font-serif text-lg">{noOfferReason ? "No good local offer right now." : "Nothing matches your context yet."}</p>
+                    <p className="mb-4 text-sm text-ink-muted">
+                      {noOfferReason ? humanizeReason(noOfferReason) + "." : "We'd rather show nothing than a noisy offer."}
+                    </p>
+                    <div className="flex justify-center gap-2">
+                      <Button onClick={refresh}>
+                        <RefreshCw size={16} /> Refresh
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {visibleOffers.map((offer) => (
+                  <OfferReviewCard
+                    key={offer.offerId}
+                    offer={offer}
+                    busy={busy}
+                    onAccept={() => handleAccept(offer.offerId)}
+                    onReject={() => handleReject(offer.offerId)}
+                  />
+                ))}
+
+                {(visibleOffers.length > 0 || lastRun) ? (
+                  <div className="surface-card rounded-2xl p-4">
+                    <button
+                      type="button"
+                      onClick={() => setWhyOpen((prev) => !prev)}
+                      className="flex w-full items-center justify-between text-sm font-medium"
+                    >
+                      <span>Why these?</span>
+                      <span className="font-mono text-xs text-ink-muted">{whyOpen ? "hide" : "show"}</span>
+                    </button>
+                    {whyOpen ? (
+                      <div className="mt-3 space-y-2 text-sm">
+                        {lastRun?.negotiationDecision?.reasoning?.length ? (
+                          <ol className="space-y-1.5">
+                            {lastRun.negotiationDecision.reasoning.map((line, index) => (
+                              <li key={`${line}-${index}`} className="flex gap-2">
+                                <span className="font-mono text-xs text-ink-muted">{String(index + 1).padStart(2, "0")}</span>
+                                <span>{line}</span>
+                              </li>
+                            ))}
+                          </ol>
+                        ) : (
+                          <p className="text-ink-muted">{noOfferReason ? `No offer: ${humanizeReason(noOfferReason)}.` : "Nothing to negotiate just yet."}</p>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </>
             ) : null}
 
-            {offer || lastRun ? (
-              <div className="surface-card rounded-2xl p-4">
-                <button
-                  type="button"
-                  onClick={() => setWhyOpen((prev) => !prev)}
-                  className="flex w-full items-center justify-between text-sm font-medium"
-                >
-                  <span>Why this?</span>
-                  <span className="font-mono text-xs text-ink-muted">{whyOpen ? "hide" : "show"}</span>
-                </button>
-                {whyOpen ? (
-                  <div className="mt-3 space-y-2 text-sm">
-                    {reasoning.length > 0 ? (
-                      <ol className="space-y-1.5">
-                        {reasoning.map((line, index) => (
-                          <li key={`${line}-${index}`} className="flex gap-2">
-                            <span className="font-mono text-xs text-ink-muted">{String(index + 1).padStart(2, "0")}</span>
-                            <span>{line}</span>
-                          </li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <p className="text-ink-muted">{noOfferReason ? `No offer: ${humanizeReason(noOfferReason)}.` : "Nothing to negotiate just yet."}</p>
-                    )}
+            {hasTriggered && tab === "redeem" ? (
+              <>
+                <div className="flex items-center justify-between px-2">
+                  <h2 className="label-tag font-semibold text-ink-muted">Ready to redeem</h2>
+                  <Badge>{tokens.length} ready</Badge>
+                </div>
+                {tokens.length === 0 ? (
+                  <div className="surface-card rounded-2xl p-6 text-center text-sm text-ink-muted">
+                    Accepted offers show up here as redemption codes.
                   </div>
-                ) : null}
-              </div>
+                ) : (
+                  tokens.map((token) => <TokenCard key={token.tokenId} token={token} />)
+                )}
+              </>
             ) : null}
 
             <TrustNote />
@@ -410,8 +436,8 @@ export function WalletApp() {
             <div className="surface-acrylic rounded-2xl p-6 text-sm text-ink-muted">
               <p className="font-serif text-lg text-ink">Quiet, on-the-side wallet</p>
               <p className="mt-2">
-                City Wallet listens to your context and only surfaces a moment when one is genuinely useful nearby.
-                It never shows raw data, scores, or developer logs in this view.
+                City Wallet listens to your context only when you ask it to. The lunch reminder is the trigger;
+                from there, your live location, weather, and calendar shape the offers we'll surface.
               </p>
               <p className="mt-3 text-xs">
                 Builders: append <code>?debug=true</code> to this URL to see the full pipeline detail.
@@ -433,9 +459,6 @@ export function WalletApp() {
                   <h2 className="font-serif text-2xl font-medium">Pipeline debug</h2>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" onClick={() => runContextPipeline("UserEnteredZone")}>
-                    <MapPin size={16} /> Re-run
-                  </Button>
                   <Button onClick={refresh} disabled={busy}>
                     <RefreshCw size={16} /> Manual refresh
                   </Button>
@@ -443,6 +466,8 @@ export function WalletApp() {
               </div>
 
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <JsonPanel title="Live coordinates" data={locationCoords} />
+                <JsonPanel title="Consumer context" data={context} />
                 <JsonPanel title="Context summary" data={contextSummary} />
                 <JsonPanel title="Connected sources" data={connectedSources} />
               </div>
@@ -454,6 +479,7 @@ export function WalletApp() {
                   <JsonPanel title="Agent trace" data={lastRun?.agentTrace ?? null} />
                   <JsonPanel title="Negotiation decision" data={lastRun?.negotiationDecision ?? null} />
                   <JsonPanel title="Validation" data={lastRun?.validationResult ?? null} />
+                  <JsonPanel title="Run offers" data={lastRun?.offers ?? []} />
                   <JsonPanel title="Candidate matrix" data={lastRun?.candidateMerchants ?? []} />
                 </div>
               </ExplainabilityPanel>
@@ -465,15 +491,136 @@ export function WalletApp() {
   );
 }
 
-function haversine(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const R = 6_371_000;
-  const phi1 = (lat1 * Math.PI) / 180;
-  const phi2 = (lat2 * Math.PI) / 180;
-  const dPhi = ((lat2 - lat1) * Math.PI) / 180;
-  const dLambda = ((lon2 - lon1) * Math.PI) / 180;
-  const a = Math.sin(dPhi / 2) * Math.sin(dPhi / 2) + Math.cos(phi1) * Math.cos(phi2) * Math.sin(dLambda / 2) * Math.sin(dLambda / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return R * c;
+function LunchBreakBanner({ busy, onActivate }: { busy: boolean; onActivate: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onActivate}
+      disabled={busy}
+      className="surface-card animate-fade-in flex w-full items-center gap-3 rounded-2xl border border-teal/30 bg-teal/5 p-4 text-left transition-colors hover:bg-teal/10 disabled:opacity-60"
+    >
+      <div className="flex h-10 w-10 items-center justify-center rounded-full bg-teal text-white">
+        <Bell size={18} />
+      </div>
+      <div className="flex-1">
+        <div className="text-xs font-mono uppercase tracking-wider text-teal">City Wallet</div>
+        <div className="font-serif text-base font-medium">Time for your lunch break</div>
+        <p className="text-xs text-ink-muted">Tap to share your live location and find a useful spot nearby.</p>
+      </div>
+      {busy ? <Loader2 className="animate-spin text-teal" size={16} /> : <MapPin className="text-teal" size={16} />}
+    </button>
+  );
+}
+
+function ContextStrip({
+  context,
+  coords,
+}: {
+  context: ConsumerContextSnapshot;
+  coords: { latitude: number; longitude: number; accuracyMeters?: number } | null;
+}) {
+  const cityLabel = context.userCityName ?? context.zoneName ?? "—";
+  const weatherLabel = context.weatherDescription ?? context.weatherMood ?? "—";
+  return (
+    <div className="mt-3 space-y-1 font-mono text-[11px] text-ink-muted">
+      {coords ? (
+        <div>
+          <span className="font-semibold text-ink">live</span> · {coords.latitude.toFixed(4)}, {coords.longitude.toFixed(4)}
+          {coords.accuracyMeters ? ` (±${Math.round(coords.accuracyMeters)} m)` : ""}
+        </div>
+      ) : null}
+      <div>
+        <span className="font-semibold text-ink">city</span> · {cityLabel}
+        {context.userCountryCode ? ` (${context.userCountryCode.toUpperCase()})` : ""}
+      </div>
+      <div>
+        <span className="font-semibold text-ink">weather</span> · {weatherLabel}
+      </div>
+      <div>
+        <span className="font-semibold text-ink">context</span> · {context.timeContext ?? "—"}
+        {context.declaredIntent ? ` · ${context.declaredIntent.replace(/_/g, " ")}` : ""}
+        {typeof context.availableMinutes === "number" ? ` · ${context.availableMinutes} min free` : ""}
+      </div>
+    </div>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        active
+          ? "flex-1 rounded-full bg-teal px-3 py-1.5 text-center font-semibold text-white"
+          : "flex-1 rounded-full px-3 py-1.5 text-center text-ink-muted hover:text-ink"
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+function OfferReviewCard({
+  offer,
+  busy,
+  onAccept,
+  onReject,
+}: {
+  offer: Offer;
+  busy: boolean;
+  onAccept: () => void;
+  onReject: () => void;
+}) {
+  const stops = offer.items.length;
+  const totalDistance = offer.items.reduce((sum, item) => sum + item.distanceMeters, 0);
+  return (
+    <div className="surface-card animate-fade-in flex flex-col gap-4 rounded-2xl p-4">
+      <div className="relative overflow-hidden rounded-xl bg-teal p-5">
+        <div className="absolute inset-0 bg-gradient-to-t from-black/35 to-transparent" />
+        <div className="relative z-10">
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-balance font-serif text-xl font-medium leading-tight text-white">{offer.headline}</h3>
+            <ValidityPill minutes={offer.validityMinutes} />
+          </div>
+          <p className="mt-1 text-sm text-white/80">{offer.subheadline}</p>
+        </div>
+      </div>
+      <div className="flex flex-col gap-3 px-2">
+        {offer.items.map((item, index) => (
+          <div key={item.offerItemId}>
+            {index > 0 ? <div className="mb-3 h-px w-full bg-black/5" /> : null}
+            <div className="flex items-center justify-between gap-3 text-sm">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="h-2 w-2 shrink-0 rounded-full bg-teal" />
+                <span className="truncate font-medium">{item.merchantName}</span>
+              </div>
+              <span className="shrink-0 text-xs text-ink-muted">
+                {item.product} · {item.incentivePercent}% cashback · {item.distanceMeters}m
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-between rounded-xl bg-paper p-3">
+        <div className="text-xs text-ink-muted">{stops} stops · ~{totalDistance}m</div>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" onClick={onReject} disabled={busy}>Reject</Button>
+          <Button onClick={onAccept} disabled={busy || offer.status !== "shown"}>
+            {offer.status === "shown" ? "Accept" : "Claimed"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function humanizeReason(reason: string) {

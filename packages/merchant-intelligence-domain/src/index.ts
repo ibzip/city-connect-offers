@@ -1213,7 +1213,7 @@ async function compileWithAzureOpenAI(
       "api-key": apiKey,
     },
     body: JSON.stringify(compileBody),
-  }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 15_000), "Azure OpenAI rule compiler");
+  }), Number(process.env.AZURE_OPENAI_TIMEOUT_MS ?? 45_000), "Azure OpenAI rule compiler");
   if (!response.ok) throw new Error(`Azure OpenAI ${response.status}: ${await response.text()}`);
   const body = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
   const content = body.choices?.[0]?.message?.content;

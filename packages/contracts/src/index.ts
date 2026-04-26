@@ -32,6 +32,7 @@ export const UserEventTypeSchema = z.enum([
   "UserContextSignalsChanged",
   "AppReturnedToForeground",
   "ManualRefreshRequested",
+  "LunchBreakNotificationClicked",
 ]);
 export type UserEventType = z.infer<typeof UserEventTypeSchema>;
 
@@ -363,12 +364,17 @@ export const ConsumerContextSnapshotSchema = z.object({
   userId: z.string(),
   zoneId: z.string(),
   zoneName: z.string().optional(),
+  // Live-resolved place name for the user's coordinates (best-effort, e.g.
+  // "Munich, DE"). Populated when reverse-geocoding succeeds; null when the
+  // user has not granted location yet or the geocoder is unavailable.
+  userCityName: z.string().nullable().optional(),
+  userCountryCode: z.string().nullable().optional(),
   matchedZones: z.array(CommerceZoneSchema).default([]),
   userLocation: GeoPointSchema.extend({
     accuracyMeters: z.number().nonnegative().optional(),
     source: z.enum(["browser", "demo_geofence"]).default("demo_geofence"),
   }).optional(),
-  locationMode: z.enum(["real_browser_location", "demo_geofence_fallback"]).default("demo_geofence_fallback"),
+  locationMode: z.enum(["real_browser_location", "demo_geofence_fallback", "no_location"]).default("demo_geofence_fallback"),
   geofenceMatched: z.boolean().default(false),
   weatherMood: z.string(),
   weatherDescription: z.string(),
@@ -456,6 +462,10 @@ export const SelectedMerchantSchema = z.object({
   product: z.string(),
   incentive: IncentiveSchema,
   roleInJourney: z.string().optional(),
+  // For multi_offer decisions: which user intent / situation this offer
+  // serves (e.g. "lunch_break", "gift_for_visitor"). Lets the wallet show
+  // each independent offer with its own contextual title.
+  intentLabel: z.string().optional(),
 });
 export type SelectedMerchant = z.infer<typeof SelectedMerchantSchema>;
 
@@ -477,7 +487,12 @@ export const NegotiationBriefSchema = z.object({
 export type NegotiationBrief = z.infer<typeof NegotiationBriefSchema>;
 
 export const NegotiationDecisionSchema = z.object({
-  decision: z.enum(["no_offer", "single_offer", "bundle_offer"]),
+  // single_offer: one merchant for one user intent.
+  // bundle_offer: a coherent journey across 2-3 merchants for ONE intent.
+  // multi_offer: an array of independent single offers, each for a DIFFERENT
+  // simultaneous user intent (e.g. lunch + gift for visitor). Persisted as
+  // N separate Offer rows.
+  decision: z.enum(["no_offer", "single_offer", "bundle_offer", "multi_offer"]),
   selectedMerchants: z.array(SelectedMerchantSchema),
   validityMinutes: z.number().int().positive(),
   consumerIncentivesOffered: z.array(z.string()),
@@ -554,6 +569,9 @@ export type OfferItem = z.infer<typeof OfferItemSchema>;
 export const OfferSchema = z.object({
   offerId: z.string(),
   consumerId: z.string(),
+  // multi_offer at the decision level fans out into multiple Offer rows, each
+  // typed as "single_offer". The decision-level multi_offer concept is NOT
+  // persisted as one Offer row; this enum stays focused on render shapes.
   type: z.enum(["single_offer", "bundle_offer"]),
   status: OfferStatusSchema,
   headline: z.string(),
@@ -606,6 +624,7 @@ export const AnalyticsEventTypeSchema = z.enum([
   "offer_validated",
   "offer_shown",
   "offer_accepted",
+  "offer_rejected",
   "redemption_token_issued",
   "token_redeemed",
   "cashback_issued",
@@ -620,6 +639,9 @@ export const AnalyticsEventTypeSchema = z.enum([
   "user_negotiator_declined",
   "backend_negotiator_failed",
   "no_offer_emitted",
+  "multi_offer_emitted",
+  "user_state_cleared",
+  "lunch_break_notification_clicked",
 ]);
 export type AnalyticsEventType = z.infer<typeof AnalyticsEventTypeSchema>;
 
@@ -772,9 +794,16 @@ export const PaymentPreferenceSignalPayloadSchema = z.object({
 export type PaymentPreferenceSignalPayload = z.infer<typeof PaymentPreferenceSignalPayloadSchema>;
 
 export const SocialSignalPayloadSchema = z.object({
-  socialMode: z.enum(["solo", "friend_meetup", "date", "family", "group", "unknown"]).optional(),
+  socialMode: z.enum(["solo", "friend_meetup", "date", "family", "group", "friend_visiting", "unknown"]).optional(),
   groupSize: z.number().int().nonnegative().optional(),
   nextSocialCommitmentInMinutes: z.number().int().nonnegative().optional(),
+  // Optional details when a friend / partner is on their way to the user.
+  // Drives the multi_offer "gift for visitor" path without hardcoding.
+  visitorContext: z.object({
+    arrivingInMinutes: z.number().int().nonnegative().optional(),
+    relation: z.string().optional(),
+    suggestedGiftCategories: z.array(z.string()).default([]),
+  }).optional(),
 });
 export type SocialSignalPayload = z.infer<typeof SocialSignalPayloadSchema>;
 
@@ -1013,6 +1042,7 @@ export const NoOfferReasonSchema = z.enum([
   "no_candidates",
   "validation_failed",
   "negotiator_returned_no_offer",
+  "location_required",
 ]);
 export type NoOfferReason = z.infer<typeof NoOfferReasonSchema>;
 
@@ -1074,6 +1104,7 @@ export const MockContextScenarioSchema = z.enum([
   "budget_conscious_errand_run",
   "quiet_focus_break",
   "gift_on_the_way",
+  "lunch_break_with_visitor",
 ]);
 export type MockContextScenario = z.infer<typeof MockContextScenarioSchema>;
 
@@ -1189,6 +1220,7 @@ export const OrchestrateRequestSchema = z.object({
     "UserContextSignalsChanged",
     "AppReturnedToForeground",
     "ManualRefreshRequested",
+    "LunchBreakNotificationClicked",
   ]),
   userId: z.string(),
   idempotencyKey: z.string().optional(),
@@ -1282,7 +1314,13 @@ export const OrchestrationResultSchema = z.object({
   negotiationBrief: NegotiationBriefSchema.optional(),
   negotiationDecision: NegotiationDecisionSchema.optional(),
   validationResult: ValidationResultSchema.optional(),
+  // Single-offer / bundle path keeps using `offer`.
   offer: OfferSchema.nullable().optional(),
+  // Multi-offer path: each entry is an independent Offer (one merchant, one
+  // user intent). For single_offer/bundle_offer this contains the same single
+  // entry as `offer` for symmetric clients; empty for no_offer; omitted on
+  // early-return branches that never reached the negotiator.
+  offers: z.array(OfferSchema).optional(),
   analyticsEvents: z.array(AnalyticsEventSchema).default([]),
   providerBudget: ProviderBudgetSchema.optional(),
   discoveredMerchants: z.array(MerchantSchema).default([]),

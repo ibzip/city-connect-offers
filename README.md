@@ -341,7 +341,7 @@ Optional real integrations:
 - Overpass remains the fallback import provider. Set `OVERPASS_USER_AGENT` so the public endpoint can accept requests reliably. Disable fallback with `ENABLE_OVERPASS_IMPORT_FALLBACK=false`.
 - Up to three Nominatim geocode attempts per orchestration, 3s timeout, DB cache, configured `NOMINATIM_USER_AGENT`. Discovered businesses without coordinates are skipped (rather than stored as ineligible).
 - One Tavily enrichment request per orchestration, 4s timeout, no coordinates trusted from Tavily.
-- Azure OpenAI timeout is `AZURE_OPENAI_TIMEOUT_MS`, default 15s.
+- Azure OpenAI timeout is `AZURE_OPENAI_TIMEOUT_MS`, default 45s. Per-agent timeouts default to the same 45s and can be tuned independently via `USER_CONTEXT_AGENT_TIMEOUT_MS` and `USER_NEGOTIATOR_AGENT_TIMEOUT_MS`.
 - Seeded partners remain enabled under all provider failures.
 
 ## Idempotency And Cooldown
